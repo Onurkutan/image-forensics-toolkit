@@ -25,7 +25,10 @@ from imgforensics.core.types import DetectionResult, Label
 
 # Standard ("Annex K") JPEG luminance quantization table at quality 50, used as
 # the libjpeg scaling-formula reference for jpeg_quality_estimate. Order does
-# not matter here since only the mean of the 64 coefficients is used.
+# not matter for that estimate (only the mean of the 64 coefficients is
+# used), but it is also reused, in this natural row-major order, by the
+# exact-match classification below -- where order matters, see
+# _classify_quant_tables.
 _ANNEX_K_LUMA_TABLE = (
     16, 11, 10, 16, 24, 40, 51, 61,
     12, 12, 14, 19, 26, 58, 60, 55,
@@ -35,6 +38,20 @@ _ANNEX_K_LUMA_TABLE = (
     24, 35, 55, 64, 81, 104, 113, 92,
     49, 64, 78, 87, 103, 121, 120, 101,
     72, 92, 95, 98, 112, 100, 103, 99,
+)  # fmt: skip
+
+# Standard ("Annex K") JPEG chrominance quantization table at quality 50
+# (libjpeg jcparam.c std_chrominance_quant_tbl), natural row-major order --
+# see _ANNEX_K_LUMA_TABLE.
+_ANNEX_K_CHROMA_TABLE = (
+    17, 18, 24, 47, 99, 99, 99, 99,
+    18, 21, 26, 66, 99, 99, 99, 99,
+    24, 26, 56, 99, 99, 99, 99, 99,
+    47, 66, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99,
 )  # fmt: skip
 
 _EDITOR_NAMES = (
@@ -287,14 +304,69 @@ def _estimate_jpeg_quality(luma_table: Sequence[int]) -> int:
     return int(round(min(100.0, max(1.0, quality))))
 
 
+def _ijg_scale_factor(quality: int) -> int:
+    """The libjpeg ``jpeg_quality_scaling`` scale factor for ``quality`` (1-100)."""
+    quality = max(1, min(100, quality))
+    return 5000 // quality if quality < 50 else 200 - quality * 2
+
+
+def _ijg_scaled_table(base: Sequence[int], quality: int) -> tuple[int, ...]:
+    """The libjpeg ``jpeg_add_quant_table`` scaling of ``base`` at ``quality``.
+
+    ``temp = (base[i] * scale + 50) / 100``, clamped to ``[1, 255]`` (the
+    ``force_baseline`` clamp libjpeg applies for 8-bit JPEGs).
+    """
+    scale = _ijg_scale_factor(quality)
+    return tuple(max(1, min(255, (coeff * scale + 50) // 100)) for coeff in base)
+
+
+# Every (luma, chroma) IJG-standard table pair for quality 1..100, keyed for
+# exact-match lookup. Built ascending so that if two qualities round to the
+# same table pair (only possible near quality 100, where clamping saturates
+# many coefficients at 1), the higher quality wins.
+_STANDARD_QUALITY_TABLES: dict[tuple[tuple[int, ...], tuple[int, ...]], int] = {
+    (_ijg_scaled_table(_ANNEX_K_LUMA_TABLE, q), _ijg_scaled_table(_ANNEX_K_CHROMA_TABLE, q)): q
+    for q in range(1, 101)
+}
+
+
+def _classify_quant_tables(quantization: dict[int, list[int]]) -> dict[str, Any]:
+    """Classify a JPEG's luma+chroma quantization tables as IJG-standard or not.
+
+    ``jpeg_quant_standard`` is ``True`` when both the luma (table 0) and
+    chroma (table 1) tables exactly equal the libjpeg-computed pair for some
+    quality 1-100 (see ``_STANDARD_QUALITY_TABLES``), in which case
+    ``jpeg_quant_quality_exact`` is that quality. It is ``False`` when both
+    tables are present but do not match any standard pair -- non-standard
+    tables typically come from cameras or Adobe products, which use their
+    own quantization tables rather than the plain libjpeg scaling formula.
+    It is ``None`` (unknown) when there is no separate chroma table to pair
+    the luma table with (e.g. a grayscale JPEG).
+    """
+    luma = quantization.get(0)
+    chroma = quantization.get(1)
+    if luma is None or chroma is None:
+        return {"jpeg_quant_standard": None, "jpeg_quant_quality_exact": None}
+    quality = _STANDARD_QUALITY_TABLES.get((tuple(luma), tuple(chroma)))
+    if quality is not None:
+        return {"jpeg_quant_standard": True, "jpeg_quant_quality_exact": quality}
+    return {"jpeg_quant_standard": False, "jpeg_quant_quality_exact": None}
+
+
 def _jpeg_quality_info(img: Image.Image) -> dict[str, Any]:
     quantization = getattr(img, "quantization", None)
     if img.format != "JPEG" or not quantization:
-        return {"jpeg_quality_estimate": None, "jpeg_quant_tables_count": None}
+        return {
+            "jpeg_quality_estimate": None,
+            "jpeg_quant_tables_count": None,
+            "jpeg_quant_standard": None,
+            "jpeg_quant_quality_exact": None,
+        }
     luma_table = quantization.get(0) or next(iter(quantization.values()))
     return {
         "jpeg_quality_estimate": _estimate_jpeg_quality(luma_table),
         "jpeg_quant_tables_count": len(quantization),
+        **_classify_quant_tables(quantization),
     }
 
 

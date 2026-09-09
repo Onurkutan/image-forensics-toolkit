@@ -207,3 +207,32 @@ def test_png_has_no_jpeg_quality_estimate() -> None:
 
     assert result.details["jpeg_quality_estimate"] is None
     assert result.details["jpeg_quant_tables_count"] is None
+    assert result.details["jpeg_quant_standard"] is None
+    assert result.details["jpeg_quant_quality_exact"] is None
+
+
+def test_pillow_saved_q75_has_standard_quant_tables() -> None:
+    image = Image.new("RGB", (64, 64), color=(120, 130, 140))
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=75)
+    fi = ForensicImage.from_bytes(buffer.getvalue())
+
+    result = MetadataSignal().predict(fi)
+
+    assert result.details["jpeg_quant_standard"] is True
+    assert result.details["jpeg_quant_quality_exact"] == 75
+
+
+def test_hand_modified_quant_table_is_not_standard() -> None:
+    image = Image.new("RGB", (64, 64), color=(120, 130, 140))
+    # A flat, non-IJG-scaled table: no combination of luma/chroma the
+    # standard libjpeg quality formula can produce is this uniform.
+    custom_table = [10] * 64
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", qtables=[custom_table, custom_table])
+    fi = ForensicImage.from_bytes(buffer.getvalue())
+
+    result = MetadataSignal().predict(fi)
+
+    assert result.details["jpeg_quant_standard"] is False
+    assert result.details["jpeg_quant_quality_exact"] is None

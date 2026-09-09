@@ -13,7 +13,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-import imgforensics.signals  # noqa: F401  (side effect: registers "metadata" and "ela")
+import imgforensics.signals  # noqa: F401  (side effect: registers metadata/ela/c2pa/sd_watermark)
 from imgforensics import __version__
 from imgforensics.core import registry
 from imgforensics.core.image import ForensicImage
