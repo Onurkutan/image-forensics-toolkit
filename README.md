@@ -89,6 +89,23 @@ halves for format, resolution, JPEG-quality, and duplicate-image bias with
 image-level (AUC, AP, accuracy, ECE, ...) and pixel-level (F1, best-F1, AP,
 IoU) metrics used to score detectors and localizers.
 
+## Benchmarking
+
+`imgforensics benchmark manifest.jsonl [--detector NAME ...] [--baselines]
+[--robustness default|PATH|none] [--out results.json] [--report report.md]`
+runs registered detectors, plus optional trivial baselines, over a manifest
+at every level of a deterministic robustness suite (clean; JPEG/WEBP
+re-encoding; resize; a resize round-trip; center crop; Gaussian noise; a
+"social" resize+JPEG+metadata-strip pipeline; see
+[`robustness_default.yaml`](src/imgforensics/eval/robustness_default.yaml)),
+and prints Markdown tables: image metrics, per-level robustness, per-group
+AUC, pixel metrics, and timing. Each detector's threshold is tuned on the
+manifest's val split when one exists; otherwise the report is marked
+"threshold tuned in-sample" as a caveat against reading it as held-out. At
+any operating threshold, a score must be strictly above it to count as a
+"fake" call, so a detector abstaining at the classical-signal midpoint of
+0.5 is not scored as calling every image fake.
+
 ## Roadmap
 
 See [docs/ROADMAP.md](docs/ROADMAP.md).

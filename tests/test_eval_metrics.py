@@ -130,20 +130,21 @@ def test_average_precision_requires_a_positive() -> None:
 def test_accuracy_at_threshold() -> None:
     y_true = [0, 0, 1, 1]
     scores = [0.1, 0.6, 0.4, 0.9]
-    # predictions at 0.5: [0, 1, 0, 1] vs y_true [0,0,1,1] -> 2/4 correct
+    # predictions at 0.5 (score > 0.5): [0, 1, 0, 1] vs y_true [0,0,1,1] -> 2/4 correct
     assert accuracy_at_threshold(y_true, scores, 0.5) == pytest.approx(0.5)
 
 
-def test_accuracy_at_threshold_boundary_counts_as_positive() -> None:
-    assert accuracy_at_threshold([1], [0.5], 0.5) == pytest.approx(1.0)
-    assert accuracy_at_threshold([0], [0.5], 0.5) == pytest.approx(0.0)
+def test_accuracy_at_threshold_boundary_counts_as_negative() -> None:
+    # A score exactly at the threshold predicts negative (strict > rule), not positive.
+    assert accuracy_at_threshold([1], [0.5], 0.5) == pytest.approx(0.0)
+    assert accuracy_at_threshold([0], [0.5], 0.5) == pytest.approx(1.0)
 
 
 def test_tpr_fpr_at_threshold() -> None:
     y_true = [0, 0, 1, 1]
     scores = [0.1, 0.6, 0.4, 0.9]
-    assert tpr_at_threshold(y_true, scores, 0.5) == pytest.approx(0.5)  # only 0.9 >= 0.5
-    assert fpr_at_threshold(y_true, scores, 0.5) == pytest.approx(0.5)  # only 0.6 >= 0.5
+    assert tpr_at_threshold(y_true, scores, 0.5) == pytest.approx(0.5)  # only 0.9 > 0.5
+    assert fpr_at_threshold(y_true, scores, 0.5) == pytest.approx(0.5)  # only 0.6 > 0.5
 
 
 def test_tpr_fpr_no_positives_or_negatives_returns_zero() -> None:
@@ -158,12 +159,26 @@ def test_balanced_accuracy_at_threshold() -> None:
     assert balanced_accuracy_at_threshold(y_true, scores, 0.5) == pytest.approx(0.5)
 
 
+def test_abstaining_detector_at_0_5_is_not_a_false_positive() -> None:
+    # Every classical signal in this project returns exactly 0.5 when it abstains
+    # ("uncertain"); at the default fixed operating point of 0.5, a detector that
+    # scores every real image 0.5 (abstain) and every fake image 1.0 must get perfect
+    # accuracy and zero false positives, not be counted as calling every image fake.
+    y_true = [0, 0, 0, 1, 1, 1]
+    scores = [0.5, 0.5, 0.5, 1.0, 1.0, 1.0]
+    assert accuracy_at_threshold(y_true, scores, 0.5) == pytest.approx(1.0)
+    assert fpr_at_threshold(y_true, scores, 0.5) == pytest.approx(0.0)
+    assert tpr_at_threshold(y_true, scores, 0.5) == pytest.approx(1.0)
+
+
 def test_best_threshold_finds_perfect_separator() -> None:
     y_true = [0, 0, 1, 1]
     scores = [0.1, 0.2, 0.8, 0.9]
     threshold, value = best_threshold(y_true, scores, objective="balanced_accuracy")
     assert value == pytest.approx(1.0)
-    assert 0.2 < threshold <= 0.8
+    # Strict `score > threshold` rule: 0.2 is the unique candidate that separates the
+    # two negatives (0.1, 0.2) from the two positives (0.8, 0.9) perfectly.
+    assert threshold == pytest.approx(0.2)
 
 
 def test_best_threshold_unknown_objective_raises() -> None:

@@ -27,6 +27,8 @@ from imgforensics.data import (
     label_from_parent_folder,
     load_registry,
 )
+from imgforensics.eval.robustness import RobustnessSuite
+from imgforensics.eval.runner import BenchmarkConfig, run_benchmark
 from imgforensics.utils.image_io import image_hash
 
 app = typer.Typer(help="Detect AI-generated images, AI-inpainted regions, and manipulations.")
@@ -214,6 +216,95 @@ def audit(
     console.print(Markdown(report.to_markdown()))
     if strict and not report.ok:
         raise typer.Exit(code=1)
+
+
+@app.command()
+def benchmark(
+    manifest_path: Annotated[
+        Path,
+        typer.Argument(exists=True, dir_okay=False, readable=True, help="Manifest .jsonl file."),
+    ],
+    detector: Annotated[
+        list[str] | None,
+        typer.Option("--detector", help="Registered detector name to include (repeatable)."),
+    ] = None,
+    all_signals: Annotated[
+        bool,
+        typer.Option("--all-signals", help="Include every registered signal detector."),
+    ] = False,
+    baselines: Annotated[
+        bool,
+        typer.Option(
+            "--baselines", help="Include the trivial baselines (constant, random, signals_mean)."
+        ),
+    ] = False,
+    robustness: Annotated[
+        str,
+        typer.Option(
+            "--robustness",
+            help="'default' (packaged suite), a YAML suite path, or 'none' (clean level only).",
+        ),
+    ] = "default",
+    limit: Annotated[
+        int | None,
+        typer.Option("--limit", help="Evaluate only the first N entries after a seeded shuffle."),
+    ] = None,
+    root: Annotated[
+        Path | None,
+        typer.Option("--root", help="Dataset root; defaults to the manifest's own recorded root."),
+    ] = None,
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", help="Path to write the full results (score records) as JSON to."),
+    ] = None,
+    report: Annotated[
+        Path | None,
+        typer.Option("--report", help="Path to write the Markdown report to; stdout when omitted."),
+    ] = None,
+) -> None:
+    """Evaluate registered detectors over a manifest and report Markdown tables."""
+    manifest = Manifest.load(manifest_path)
+
+    names = set(detector or [])
+    if all_signals:
+        names |= set(registry.available())
+    unknown = sorted(names - set(registry.available()))
+    if unknown:
+        raise typer.BadParameter(
+            f"Unknown detector(s): {', '.join(unknown)}. "
+            f"Available: {', '.join(registry.available()) or '<none>'}"
+        )
+    if not names and not baselines:
+        raise typer.BadParameter(
+            "No detectors selected: pass --detector, --all-signals, and/or --baselines."
+        )
+
+    if robustness == "default":
+        suite = RobustnessSuite.default()
+    elif robustness == "none":
+        suite = None
+    else:
+        suite = RobustnessSuite.from_yaml(Path(robustness))
+
+    config = BenchmarkConfig(
+        detectors=sorted(names),
+        include_baselines=baselines,
+        robustness=suite,
+        limit=limit,
+    )
+    result = run_benchmark(manifest, config, root=root, progress=False)
+
+    if out is not None:
+        result.save_json(out)
+        console.print(f"Wrote {len(result.records)} score record(s) to {out}")
+
+    markdown_report = result.to_markdown()
+    if report is not None:
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(markdown_report, encoding="utf-8")
+        console.print(f"Wrote report to {report}")
+    else:
+        console.print(Markdown(markdown_report))
 
 
 @datasets_app.command("list")

@@ -12,6 +12,20 @@ depending on array order, so re-ordering equal-scored samples never changes
 the result (:func:`roc_auc` in particular is invariant to any strictly
 monotone transform of the scores -- see the property test in
 ``tests/test_eval_metrics.py``).
+
+**Threshold convention.** The image-level threshold metrics
+(:func:`accuracy_at_threshold`, :func:`tpr_at_threshold`,
+:func:`fpr_at_threshold`, :func:`balanced_accuracy_at_threshold`, and
+therefore :func:`best_threshold`) predict positive ("fake") iff
+``score > threshold`` -- a score exactly at the threshold predicts negative.
+This is strict, not ``>=``, because every classical signal in this project
+returns exactly ``0.5`` when it abstains ("uncertain"; see
+:func:`imgforensics.core.types.label_from_score`), and the default fixed
+operating point is ``0.5``: with a ``>=`` rule an abstaining detector would
+be counted as calling every image fake. The pixel-level functions
+(:func:`pixel_f1`, :func:`pixel_iou`, and the ``pixel_best_f1`` sweep) are
+unaffected by this and keep the ``>=`` convention on heatmap probabilities,
+since heatmaps do not carry the same "0.5 means abstain" meaning.
 """
 
 from __future__ import annotations
@@ -110,34 +124,54 @@ def average_precision(y_true: ArrayLike, scores: ArrayLike) -> float:
 
 
 def accuracy_at_threshold(y_true: ArrayLike, scores: ArrayLike, threshold: float) -> float:
-    """Fraction of correct predictions at ``threshold`` (score == threshold predicts positive)."""
+    """Fraction of correct predictions at ``threshold``.
+
+    Strict: ``score > threshold`` predicts positive, so a score exactly at
+    the threshold predicts negative (see "Threshold convention" above -- a
+    detector that abstains at exactly ``0.5`` is not counted as calling the
+    image fake).
+    """
     y_true_arr = np.asarray(y_true)
-    predictions = np.asarray(scores) >= threshold
+    predictions = np.asarray(scores) > threshold
     return float(np.mean(predictions == y_true_arr))
 
 
 def tpr_at_threshold(y_true: ArrayLike, scores: ArrayLike, threshold: float) -> float:
-    """True positive rate (recall) at ``threshold``; ``0.0`` when there are no positives."""
+    """True positive rate (recall) at ``threshold``; ``0.0`` when there are no positives.
+
+    Strict: ``score > threshold`` predicts positive (see "Threshold
+    convention" above).
+    """
     y_true_arr = np.asarray(y_true)
     positive_mask = y_true_arr == 1
     if not np.any(positive_mask):
         return 0.0
-    predictions = np.asarray(scores) >= threshold
+    predictions = np.asarray(scores) > threshold
     return float(np.mean(predictions[positive_mask]))
 
 
 def fpr_at_threshold(y_true: ArrayLike, scores: ArrayLike, threshold: float) -> float:
-    """False positive rate at ``threshold``; ``0.0`` when there are no negatives."""
+    """False positive rate at ``threshold``; ``0.0`` when there are no negatives.
+
+    Strict: ``score > threshold`` predicts positive (see "Threshold
+    convention" above), so an abstaining detector that scores every real
+    image exactly at the threshold contributes ``0.0`` false positives
+    rather than counting every abstention as a false "fake" call.
+    """
     y_true_arr = np.asarray(y_true)
     negative_mask = y_true_arr == 0
     if not np.any(negative_mask):
         return 0.0
-    predictions = np.asarray(scores) >= threshold
+    predictions = np.asarray(scores) > threshold
     return float(np.mean(predictions[negative_mask]))
 
 
 def balanced_accuracy_at_threshold(y_true: ArrayLike, scores: ArrayLike, threshold: float) -> float:
-    """Mean of true positive rate and true negative rate at ``threshold``."""
+    """Mean of true positive rate and true negative rate at ``threshold``.
+
+    Strict: ``score > threshold`` predicts positive (see "Threshold
+    convention" above).
+    """
     tpr = tpr_at_threshold(y_true, scores, threshold)
     tnr = 1.0 - fpr_at_threshold(y_true, scores, threshold)
     return float((tpr + tnr) / 2.0)
@@ -159,6 +193,11 @@ def best_threshold(
     distinct scores (moving the threshold without crossing a data point
     cannot change any prediction). Ties in the objective keep the first
     (lowest) threshold encountered when scanning scores in ascending order.
+
+    Candidates are the score values themselves, and predictions use the
+    strict ``score > threshold`` rule (see "Threshold convention" above), so
+    a candidate equal to the maximum score predicts nothing positive -- that
+    is a legitimate (if usually suboptimal) candidate, not a bug.
 
     Args:
         objective: ``"accuracy"`` or ``"balanced_accuracy"``.

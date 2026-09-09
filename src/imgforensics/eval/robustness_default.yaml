@@ -1,0 +1,64 @@
+# Deterministic robustness suite (see imgforensics.eval.robustness).
+#
+# Changing any value here -- adding/removing a level, or editing a level's
+# params -- changes what "robustness" means for every benchmark run that
+# uses the default suite: a robustness table produced under one version of
+# this file is not comparable to one produced under another. Bump `version`
+# whenever a value changes so old and new results can be told apart, and
+# keep this file version-controlled like any other reproducibility input
+# (see docs/ROADMAP.md, section 3, "reproducibility").
+version: 1
+
+levels:
+  - name: clean
+    kind: clean
+    params: {}
+
+  - name: jpeg_q95
+    kind: jpeg
+    params: { quality: 95 }
+  - name: jpeg_q85
+    kind: jpeg
+    params: { quality: 85 }
+  - name: jpeg_q75
+    kind: jpeg
+    params: { quality: 75 }
+  - name: jpeg_q60
+    kind: jpeg
+    params: { quality: 60 }
+  - name: jpeg_q50
+    kind: jpeg
+    params: { quality: 50 }
+
+  - name: webp_q80
+    kind: webp
+    params: { quality: 80 }
+
+  - name: resize_0.75
+    kind: resize
+    params: { scale: 0.75 }
+  - name: resize_0.5
+    kind: resize
+    params: { scale: 0.5 }
+  - name: resize_0.25
+    kind: resize
+    params: { scale: 0.25 }
+
+  - name: roundtrip_0.5
+    kind: resize_roundtrip
+    params: { scale: 0.5 }
+
+  - name: crop_0.8
+    kind: center_crop
+    params: { fraction: 0.8 }
+
+  - name: noise_2
+    kind: gaussian_noise
+    params: { sigma: 2 }
+  - name: noise_5
+    kind: gaussian_noise
+    params: { sigma: 5 }
+
+  - name: social_1080_q80
+    kind: social
+    params: { max_side: 1080, quality: 80 }

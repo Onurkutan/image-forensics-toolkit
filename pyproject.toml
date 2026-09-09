@@ -72,7 +72,7 @@ imgforensics = "imgforensics.cli:app"
 where = ["src"]
 
 [tool.setuptools.package-data]
-imgforensics = ["data/*.yaml", "py.typed"]
+imgforensics = ["data/*.yaml", "eval/*.yaml", "py.typed"]
 
 [tool.ruff]
 line-length = 100
