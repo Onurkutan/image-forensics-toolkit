@@ -23,9 +23,8 @@ from imgforensics.core.registry import register
 from imgforensics.core.types import DetectionResult, Label
 from imgforensics.signals.metadata import _find_ai_terms
 
-# c2pa-python's Reader auto-detects far more containers than this, but the
-# spec for this signal only asks for these five; anything else falls back to
-# mime=None (best-effort auto-detection from the bytes -- see _predict).
+# Formats mapped to an explicit MIME type; anything else falls back to
+# mime=None, letting c2pa-python auto-detect the container from the bytes.
 _MIME_BY_FORMAT: dict[str, str] = {
     "JPEG": "image/jpeg",
     "PNG": "image/png",
@@ -222,8 +221,9 @@ def _score(details: dict[str, Any]) -> tuple[float, Label]:
     # recognized AI marker nor a plain capture, and there is no edit
     # history -- e.g. no c2pa.actions assertion at all, or a source type
     # like "humanEdits"/"digitalCreation" this signal does not specifically
-    # score. Not one of the six rules in the spec this signal implements;
-    # added so the signal never falls through without a documented answer.
+    # score. Fallback for a valid manifest that matches none of the six
+    # rules above; added so the signal never falls through without a
+    # documented answer.
     details["note"] = (
         "C2PA manifest valid but inconclusive: no recognized source-type or action evidence"
     )

@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - metadata signal: `jpeg_quant_standard` / `jpeg_quant_quality_exact`, an exact IJG-standard-table classification of the JPEG's luma+chroma quantization tables (complementing the existing quality estimate)
 - `c2pa` signal: C2PA manifest verification via the optional `c2pa-python` extra (`pip install imgforensics[provenance]`), lazily imported so the base install is unaffected
 - `sd_watermark` signal: decodes the Stable Diffusion `dwtDct` invisible watermark via a vendored pure numpy/opencv/PyWavelets codec (`src/imgforensics/signals/_vendor/dwtdct.py`, from `ShieldMnt/invisible-watermark`), checked against the SDXL 48-bit and CompVis Stable Diffusion v1 136-bit reference payloads
+- `copy_move` signal: block-matching copy-move (duplicated-region) detector with a matched-region heatmap, using overlapping quantized zig-zag-DCT block features sorted for near-neighbour matching and a shift-vote with a periodic-texture guard
+- `jpeg_ghost` signal: Farid's JPEG-ghost recompression-quality mismatch, with a splice-localization heatmap
+- `double_jpeg` signal: JPEG 8x8 blocking-grid offset (crop/composite detection) and aligned double-quantization periodicity, both pixel-domain checks with no DCT-coefficient library dependency
+- shared test fixture `tests/conftest.py::natural_like_image`, reused by the copy-move, JPEG-ghost and double-JPEG test suites
 
 ### Changed
 

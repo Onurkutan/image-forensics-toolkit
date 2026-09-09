@@ -5,11 +5,14 @@
 A toolkit to detect AI-generated images, AI-inpainted regions, and classic manipulations
 (splicing/copy-move), producing an image-level score plus an optional heatmap.
 
-Status: early development (v0.1.0). Four classical signals are implemented so
+Status: early development (v0.1.0). Seven classical signals are implemented so
 far: `metadata` (EXIF/XMP/editor/AI-generator markers, thumbnail consistency,
 JPEG quality estimate and quantization-table classification), `ela` (Error
-Level Analysis with heatmap), `c2pa` (C2PA manifest verification) and
-`sd_watermark` (Stable Diffusion invisible-watermark decode). See
+Level Analysis with heatmap), `c2pa` (C2PA manifest verification),
+`sd_watermark` (Stable Diffusion invisible-watermark decode), `copy_move`
+(block-matching duplicated-region detection with heatmap), `jpeg_ghost`
+(JPEG-ghost recompression-quality mismatch with heatmap) and `double_jpeg`
+(blocking-grid offset and aligned double-quantization periodicity). See
 [Signals](#signals) below for what each one reads and its blind spots.
 
 ## Planned architecture
@@ -50,6 +53,9 @@ as a verdict -- see `details` in its output for the evidence.
 | `ela` | Re-encodes the image at a fixed JPEG quality and diffs against the original | Bounded to [0.3, 0.65] -- an explanation aid (see the heatmap), never a standalone verdict | Useless on an already-uniformly-recompressed image; a second JPEG save by any platform equalises the error level everywhere |
 | `c2pa` | Any C2PA manifest embedded in the file (via `c2pa-python`, optional `provenance` extra) | High = signed as AI-generated or the signed content hash no longer matches; low = signed camera capture with no edits; 0.5 = no manifest or an untrusted/self-signed signer with no other evidence | A missing manifest proves nothing -- most images, including AI-generated ones, carry no C2PA data at all; manifests are stripped by many platforms just like EXIF |
 | `sd_watermark` | Decodes the DWT-DCT ("dwtDct") invisible watermark Stable Diffusion reference pipelines embed, checking bit-agreement against known payloads | High = a known payload's decoded bits matched; 0.45 = no known payload matched | This specific scheme embeds only in chroma and does not survive JPEG re-encoding (even at quality 100, due to chroma subsampling) or a resize; only covers the two reference-pipeline payloads, not every SD fork or later generators |
+| `copy_move` | Block-matching search (downscaled, quantized zig-zag DCT features) for a duplicated region copied and pasted elsewhere in the same image, with a matched-region heatmap | 0.85 "fake" = a dominant shift with enough votes and matched area found; 0.60 "uncertain" = accepted but small matched area; 0.45 "uncertain" = no duplicate found (not evidence of authenticity) | Blind to a clone that was rotated or rescaled before pasting; heavy recompression can in principle merge distinct blocks; naturally repetitive textures (tiles, fences) are guarded against via a minimum-distance rule and a shift-consistency check, but are not impossible to fool |
+| `jpeg_ghost` | Re-saves the image at a range of JPEG qualities and finds, per block, the quality whose re-save error is anomalously low compared to the rest of the image (Farid's JPEG ghosts), with a heatmap | Bounded to [0.3, 0.7] like `ela` -- an explanation aid, never a standalone verdict | Requires the image to be JPEG-derived; useless once a platform has uniformly re-encoded the whole image after the fact |
+| `double_jpeg` | Two independent pixel-domain checks: whether the JPEG 8x8 blocking grid still starts at the image origin, with a secondary-phase check for a masked older grid underneath it (crop/composite detection); and, for JPEG inputs only, whether the DCT coefficient histogram -- normalized by the file's own quantization step, so the check measures a genuine second, coarser compression rather than just how lossy the current one is -- shows aligned double-quantization periodicity | 0.75 "fake" = blocking grid misaligned; 0.60 "uncertain" = a second, offset grid or double compression suspected (weak evidence alone); 0.45/0.40 "uncertain" = no JPEG history detectable / no evidence either way | Both checks are quantization-history fingerprints, not proof of malicious editing; the double-quantization check only detects a *coarser-then-finer* double compression (the reverse order, and same-or-finer-then-coarser, leave no detectable comb) and only on JPEG inputs; a suspected double compression is common for any re-shared image, and a misaligned grid only proves a crop-then-resave happened |
 
 ## Project layout
 
