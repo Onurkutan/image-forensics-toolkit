@@ -16,7 +16,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 import imgforensics.signals  # noqa: F401  (side effect: registers all seven signals)
-from imgforensics import __version__
+from imgforensics import __version__, detectors
 from imgforensics.core import registry
 from imgforensics.core.image import ForensicImage
 from imgforensics.core.types import DetectionResult
@@ -34,6 +34,8 @@ from imgforensics.data import (
     prepare,
     sample,
 )
+from imgforensics.detectors import BACKBONES, CropPolicy, FeatureCache, FeatureExtractor
+from imgforensics.detectors.features import extract_to_cache
 from imgforensics.eval.robustness import RobustnessSuite
 from imgforensics.eval.runner import BenchmarkConfig, run_benchmark
 from imgforensics.utils.image_io import image_hash
@@ -41,8 +43,10 @@ from imgforensics.utils.image_io import image_hash
 app = typer.Typer(help="Detect AI-generated images, AI-inpainted regions, and manipulations.")
 datasets_app = typer.Typer(help="Browse the external dataset registry.")
 manifest_app = typer.Typer(help="Build dataset manifests.")
+features_app = typer.Typer(help="Extract and cache frozen-backbone features.")
 app.add_typer(datasets_app, name="datasets")
 app.add_typer(manifest_app, name="manifest")
+app.add_typer(features_app, name="features")
 console = Console()
 # A wider, fixed-width console for the dataset-registry tables: names and
 # license strings are long enough that the default (terminal-detected, often
@@ -51,6 +55,8 @@ console = Console()
 _registry_console = Console(width=160)
 
 _DETAIL_STRING_LIMIT = 80
+_DEFAULT_FEATURE_CACHE = Path("data/features")
+_BYTES_PER_MIB = 1024 * 1024
 
 
 def _jsonable(value: Any) -> Any:
@@ -457,6 +463,107 @@ def datasets_prepare(
     console.print(Markdown(report.to_markdown()))
     if strict_audit and not report.ok:
         raise typer.Exit(code=1)
+
+
+def _require_ml() -> None:
+    """Exit with a clear message when the optional ``ml`` extra is missing."""
+    if not detectors.is_ml_available():
+        console.print(
+            "[red]The 'ml' extra (torch, timm) is not installed, so features cannot be "
+            "extracted.[/red]\n"
+            'Install it with: pip install -e ".[ml]"  '
+            "(add --index-url https://download.pytorch.org/whl/cu130 for a CUDA build; "
+            'see the README section "Learned detectors").'
+        )
+        raise typer.Exit(code=1)
+
+
+@features_app.command("extract")
+def features_extract(
+    manifest_path: Annotated[
+        Path,
+        typer.Argument(exists=True, dir_okay=False, readable=True, help="Manifest .jsonl file."),
+    ],
+    cache_dir: Annotated[
+        Path,
+        typer.Option("--cache-dir", help="Directory to read and write cached features in."),
+    ] = _DEFAULT_FEATURE_CACHE,
+    backbone: Annotated[
+        str,
+        typer.Option("--backbone", help="Frozen backbone name (see 'features info')."),
+    ] = "dinov2_vitb14",
+    crop_mode: Annotated[
+        str, typer.Option("--crop-mode", help="Crop policy mode: center, grid, or random.")
+    ] = "grid",
+    max_crops: Annotated[int, typer.Option("--max-crops", help="Maximum crops per image.")] = 4,
+    limit: Annotated[
+        int | None, typer.Option("--limit", help="Process only the first N manifest entries.")
+    ] = None,
+    device: Annotated[
+        str, typer.Option("--device", help="auto, cpu, cuda, or an explicit torch device.")
+    ] = "auto",
+) -> None:
+    """Extract frozen-backbone features for every manifest image, caching them on disk."""
+    _require_ml()
+
+    if backbone not in BACKBONES:
+        raise typer.BadParameter(
+            f"Unknown backbone {backbone!r}. Available: {', '.join(sorted(BACKBONES))}"
+        )
+    if crop_mode not in ("center", "grid", "random"):
+        raise typer.BadParameter(f"Unknown crop mode {crop_mode!r}. Use center, grid, or random.")
+
+    manifest = Manifest.load(manifest_path)
+    entries = manifest.entries[:limit] if limit is not None else manifest.entries
+    root = Path(manifest.meta.root)
+    paths = [root / entry.path for entry in entries]
+
+    spec = BACKBONES[backbone]
+    policy = CropPolicy.model_validate(
+        {"size": spec.input_size, "mode": crop_mode, "max_crops": max_crops}
+    )
+    extractor = FeatureExtractor(backbone=backbone, device=device, crop_policy=policy)
+    cache = FeatureCache(cache_dir)
+
+    console.print(
+        f"Extracting {backbone} features for {len(paths)} image(s) "
+        f"into {cache_dir} (crop mode {crop_mode}, up to {max_crops} crops of {spec.input_size}px)"
+    )
+    summary = extract_to_cache(paths, cache, extractor, progress=True)
+    cache.write_index()
+
+    table = Table(title="Feature extraction")
+    table.add_column("field", style="bold")
+    table.add_column("value")
+    table.add_row("device", str(extractor.device))
+    table.add_row("images", str(summary["images"]))
+    table.add_row("cache hits (skipped)", str(summary["cache_hits"]))
+    table.add_row("feature shape", str(summary["feature_shape"]))
+    table.add_row("elapsed", f"{float(summary['elapsed_s']):.2f} s")
+    table.add_row("throughput", f"{float(summary['images_per_s']):.2f} images/s")
+    table.add_row("cache size", f"{float(summary['cache_bytes']) / _BYTES_PER_MIB:.2f} MiB")
+    console.print(table)
+
+
+@features_app.command("info")
+def features_info(
+    cache_dir: Annotated[
+        Path, typer.Option("--cache-dir", help="Feature cache directory to summarize.")
+    ] = _DEFAULT_FEATURE_CACHE,
+) -> None:
+    """Print how many cached feature files the cache holds, per backbone."""
+    _require_ml()
+
+    cache = FeatureCache(cache_dir)
+    counts = cache.stats()
+    table = Table(title=f"Feature cache: {cache_dir}")
+    table.add_column("backbone")
+    table.add_column("images", justify="right")
+    for name in sorted(counts):
+        table.add_row(name, str(counts[name]))
+    table.add_row("total", str(sum(counts.values())))
+    console.print(table)
+    console.print(f"Cache size: {cache.size_bytes() / _BYTES_PER_MIB:.2f} MiB")
 
 
 @manifest_app.command("build")

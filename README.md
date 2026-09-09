@@ -121,6 +121,52 @@ any operating threshold, a score must be strictly above it to count as a
 "fake" call, so a detector abstaining at the classical-signal midpoint of
 0.5 is not scored as calling every image fake.
 
+## Learned detectors (optional `ml` extra)
+
+The learned half of the toolkit (Phase 3) is built on a **frozen** ViT
+backbone: features are extracted once, cached on disk, and a small head is
+trained on top of them. Nothing here is installed by default -- `torch`,
+`torchvision`, `timm` and `safetensors` live in the optional `ml` extra, and
+the rest of the package imports and runs without them.
+
+```bash
+# 1. torch first, from the wheel index your driver supports (cu130 shown; use cpu for CPU-only)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+# 2. then the package with the ml extra (timm, safetensors resolve from PyPI)
+pip install -e ".[dev,ml]"
+
+imgforensics features extract manifest.jsonl --cache-dir data/features
+imgforensics features info --cache-dir data/features
+```
+
+Two backbones are registered: `dinov2_vitb14` (DINOv2 ViT-B/14, the default;
+a frozen self-supervised space separates real from generated images better
+than a language-aligned one) and `clip_vitl14` (OpenAI CLIP ViT-L/14, kept as
+the comparison space). Both are read at several depths: `extract` returns the
+CLS token of each selected transformer block plus the model's pooled output,
+as an array of shape `(n_crops, n_layers, dim)`.
+
+**Crop, never resize.** Every image reaches the backbone as native-resolution
+224 px crops -- `center`, `grid` (the tiles closest to the image center) or
+`random` (seeded from the image's own bytes, so the crops are reproducible per
+image). Resizing would low-pass exactly the high-frequency generator artifacts
+a detector keys on, so it never happens: images *smaller* than the crop size
+are reflection-padded, not upscaled.
+
+**Feature cache.** `imgforensics features extract` writes one `.npz` per
+(image sha256, backbone, crop policy) under `--cache-dir` (default
+`data/features`, gitignored), storing the features as float16 alongside the
+layer indices, crop policy and backbone that produced them. Re-running skips
+anything already cached, so changing the head -- or adding images to a
+manifest -- costs no GPU time for the images already done. Both `features`
+commands print an install hint and exit 1 when the `ml` extra is missing.
+
+**Weights are downloaded, never committed.** The backbone weights (about
+350 MB for DINOv2 ViT-B/14) are fetched from the Hugging Face Hub on first
+use and cached there; set `IMGFORENSICS_WEIGHTS_DIR` to keep them in the
+project's gitignored `weights/` directory instead. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for each model's license.
+
 ## Roadmap
 
 See [docs/ROADMAP.md](docs/ROADMAP.md).

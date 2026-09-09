@@ -3,10 +3,11 @@
 This file lists every third-party library this repository depends on, its
 license, and whether that license permits commercial use
 (`commercial_ok`). Third-party models, weights and datasets are not
-included in this repository; they will be listed here, with their own
-license and `commercial_ok` flag, as they are added in later phases. They
-are downloaded by the user from their original source and are never
-redistributed by this repository (see `docs/ROADMAP.md`, section 7).
+included in this repository; the ones already integrated are listed under
+"Model weights" below, with their own license and `commercial_ok` flag, and
+further ones are added as later phases integrate them. They are downloaded
+by the user from their original source and are never redistributed by this
+repository (see `docs/ROADMAP.md`, section 7).
 
 ## Runtime dependencies
 
@@ -26,13 +27,34 @@ redistributed by this repository (see `docs/ROADMAP.md`, section 7).
 
 Installed with the named extra; the corresponding signal degrades to an
 "uncertain" abstain with a `details["reason"]` explanation when the extra is
-not installed, rather than failing.
+not installed, rather than failing. The `ml` extra is the exception to that
+pattern: it backs the learned detectors rather than a signal, so the
+`imgforensics features` commands print an install hint and exit 1 when it is
+missing (`imgforensics.detectors.is_ml_available()` reports the same thing in
+code).
 
 | Package | Extra | License | commercial_ok |
 |---|---|---|---|
 | c2pa-python | `provenance` | MIT OR Apache-2.0 | yes |
 | huggingface_hub | `data` | Apache-2.0 | yes |
 | gdown | `data` | MIT | yes |
+| torch | `ml` | BSD-3-Clause | yes |
+| torchvision | `ml` | BSD-3-Clause | yes |
+| timm | `ml` | Apache-2.0 | yes |
+| safetensors | `ml` | Apache-2.0 | yes |
+
+## Model weights
+
+Weights are **never committed to this repository**: each is downloaded from
+the Hugging Face Hub on first use and cached outside the working tree (the
+Hub's default cache, or `IMGFORENSICS_WEIGHTS_DIR` when set -- point it at
+the gitignored `weights/` directory to keep everything inside the project).
+Both are loaded frozen, through `timm`, and only ever read.
+
+| Model | timm id | License | commercial_ok | Source |
+|---|---|---|---|---|
+| DINOv2 ViT-B/14 | `vit_base_patch14_dinov2.lvd142m` | Apache-2.0 | yes | `facebookresearch/dinov2`; downloaded from the Hugging Face Hub on first use, never committed |
+| OpenAI CLIP ViT-L/14 | `vit_large_patch14_clip_224.openai` | MIT | yes | `openai/CLIP`; downloaded from the Hugging Face Hub on first use, never committed |
 
 ## Development dependencies
 

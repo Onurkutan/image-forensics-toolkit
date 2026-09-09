@@ -32,3 +32,24 @@ jobs:
 
       - name: Test
         run: pytest
+
+  ml:
+    name: ml tests (optional extra)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install CPU-only torch
+        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install package with the ml extra
+        run: pip install -e ".[dev,ml]"
+
+      - name: Test (ml only)
+        run: pytest -m ml
