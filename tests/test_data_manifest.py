@@ -4,14 +4,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
+from conftest import natural_like_image
 from PIL import Image
 
+from imgforensics.data.audit import audit_manifest
 from imgforensics.data.manifest import (
+    CropReport,
     Manifest,
     ManifestEntry,
     ManifestMeta,
     build_manifest,
+    crop_entries,
     label_from_parent_folder,
     merge,
     sample,
@@ -505,3 +510,216 @@ def test_split_by_group_never_splits_a_group_across_both_halves() -> None:
             train_paths_by_generator.setdefault(entry.generator, set()).add(entry.path)
     val_generators = {e.generator for e in val.entries if e.generator is not None}
     assert set(train_paths_by_generator) & val_generators == set()
+
+
+# --- crop_entries() -----------------------------------------------------------
+
+
+def _build_mixed_resolution_manifest(
+    tmp_path: Path, *, n: int = 5, real_size: int = 1024, fake_size: int = 512
+) -> Manifest:
+    """A manifest of ``n`` reals at ``real_size`` and ``n`` fakes at ``fake_size``, all PNG."""
+    root = tmp_path / "src"
+    (root / "real").mkdir(parents=True)
+    (root / "fake").mkdir(parents=True)
+    for i in range(n):
+        natural_like_image(size=(real_size, real_size), seed=i).save(
+            root / "real" / f"r{i}.png", format="PNG"
+        )
+    for i in range(n):
+        natural_like_image(size=(fake_size, fake_size), seed=100 + i).save(
+            root / "fake" / f"f{i}.png", format="PNG"
+        )
+    manifest, skipped = build_manifest(
+        root, dataset="mixed-res", label_of=label_from_parent_folder, progress=False
+    )
+    assert skipped == []
+    return manifest
+
+
+def test_crop_entries_center_mode_matches_source_pixels_exactly(tmp_path: Path) -> None:
+    manifest = _build_mixed_resolution_manifest(tmp_path, n=1, real_size=1024, fake_size=512)
+    out_dir = tmp_path / "out"
+
+    cropped, report = crop_entries(
+        manifest, out_dir, size=512, mode="center", labels=("real",), progress=False
+    )
+
+    assert report.cropped == 1
+    assert report.tiles_written == 0
+
+    entry = next(e for e in cropped.entries if e.extra["source_path"] == "real/r0.png")
+    assert entry.path == "real/r0.png"
+    assert entry.width == 512
+    assert entry.height == 512
+    assert entry.format == "PNG"
+
+    source = np.asarray(Image.open(tmp_path / "src" / "real" / "r0.png").convert("RGB"))
+    output = np.asarray(Image.open(out_dir / "real" / "r0.png").convert("RGB"))
+    expected = source[256:768, 256:768]
+    assert np.array_equal(output, expected)
+
+
+def test_crop_entries_tiles_mode_yields_four_exact_tiles(tmp_path: Path) -> None:
+    manifest = _build_mixed_resolution_manifest(tmp_path, n=1, real_size=1024, fake_size=512)
+    out_dir = tmp_path / "out"
+
+    cropped, report = crop_entries(
+        manifest, out_dir, size=512, mode="tiles", labels=("real",), progress=False
+    )
+
+    assert report.cropped == 1
+    assert report.tiles_written == 4
+    tile_entries = sorted(
+        (e for e in cropped.entries if e.extra["source_path"] == "real/r0.png"),
+        key=lambda e: e.extra["tile_index"],
+    )
+    assert [e.path for e in tile_entries] == [
+        "real/r0_t00.png",
+        "real/r0_t01.png",
+        "real/r0_t02.png",
+        "real/r0_t03.png",
+    ]
+
+    source = np.asarray(Image.open(tmp_path / "src" / "real" / "r0.png").convert("RGB"))
+    expected_boxes = [(0, 0), (0, 512), (512, 0), (512, 512)]
+    for entry, (top, left) in zip(tile_entries, expected_boxes, strict=True):
+        output = np.asarray(Image.open(out_dir / entry.path).convert("RGB"))
+        expected = source[top : top + 512, left : left + 512]
+        assert np.array_equal(output, expected)
+        assert entry.width == 512
+        assert entry.height == 512
+
+
+def test_crop_entries_small_image_is_passthrough(tmp_path: Path) -> None:
+    root = tmp_path / "src"
+    (root / "real").mkdir(parents=True)
+    natural_like_image(size=(300, 300), seed=1).save(root / "real" / "small.png", format="PNG")
+    manifest, _ = build_manifest(
+        root, dataset="ds", label_of=label_from_parent_folder, progress=False
+    )
+    out_dir = tmp_path / "out"
+
+    cropped, report = crop_entries(
+        manifest, out_dir, size=512, mode="center", labels=("real",), progress=False
+    )
+
+    assert report.passthrough == 1
+    assert report.cropped == 0
+    entry = cropped.entries[0]
+    assert entry.path == "real/small.png"
+    assert entry.width == 300
+    assert entry.height == 300
+    assert entry.extra["crop_mode"] == "center"
+    assert entry.extra["crop_size"] == 512
+    # Passthrough is a byte-identical copy.
+    assert (out_dir / "real" / "small.png").read_bytes() == (
+        root / "real" / "small.png"
+    ).read_bytes()
+
+
+def test_crop_entries_copies_entries_outside_labels_unchanged(tmp_path: Path) -> None:
+    manifest = _build_mixed_resolution_manifest(tmp_path, n=1, real_size=1024, fake_size=512)
+    out_dir = tmp_path / "out"
+
+    cropped, report = crop_entries(
+        manifest, out_dir, size=512, mode="center", labels=("real",), progress=False
+    )
+
+    assert report.copied == 1
+    fake_entry = next(e for e in cropped.entries if e.label == "fake")
+    assert fake_entry.path == "fake/f0.png"
+    assert fake_entry.extra["crop_mode"] is None
+    assert fake_entry.extra["crop_size"] is None
+    assert fake_entry.extra["tile_index"] is None
+    assert (out_dir / "fake" / "f0.png").read_bytes() == (
+        tmp_path / "src" / "fake" / "f0.png"
+    ).read_bytes()
+
+
+def test_crop_entries_output_manifest_round_trips_with_extra(tmp_path: Path) -> None:
+    manifest = _build_mixed_resolution_manifest(tmp_path, n=2, real_size=1024, fake_size=512)
+    out_dir = tmp_path / "out"
+    out_path = tmp_path / "cropped.jsonl"
+
+    cropped, _ = crop_entries(
+        manifest, out_dir, size=512, mode="center", labels=("real",), progress=False
+    )
+    cropped.save(out_path)
+    loaded = Manifest.load(out_path)
+
+    assert len(loaded.entries) == len(manifest.entries)
+    assert loaded.meta.root == str(out_dir.resolve())
+    assert "cropped real to 512 (center) from mixed-res" in (loaded.meta.notes or "")
+    for entry in loaded.entries:
+        assert "source_path" in entry.extra
+        assert "original_width" in entry.extra
+        assert "original_height" in entry.extra
+        assert entry.mask_path is None
+
+
+def test_crop_entries_resolves_resolution_bias_in_audit(tmp_path: Path) -> None:
+    manifest = _build_mixed_resolution_manifest(tmp_path, n=6, real_size=1024, fake_size=512)
+
+    before = audit_manifest(manifest)
+    assert not before.ok
+    assert any("Resolution" in problem for problem in before.problems)
+
+    out_dir = tmp_path / "out"
+    cropped, _ = crop_entries(
+        manifest, out_dir, size=512, mode="center", labels=("real",), progress=False
+    )
+
+    after = audit_manifest(cropped)
+    assert not any("Resolution" in problem for problem in after.problems)
+
+
+def test_crop_entries_is_idempotent(tmp_path: Path) -> None:
+    manifest = _build_mixed_resolution_manifest(tmp_path, n=2, real_size=1024, fake_size=512)
+    out_dir = tmp_path / "out"
+
+    first, first_report = crop_entries(
+        manifest, out_dir, size=512, mode="tiles", labels=("real",), progress=False
+    )
+    second, second_report = crop_entries(
+        manifest, out_dir, size=512, mode="tiles", labels=("real",), progress=False
+    )
+
+    assert first_report.bytes_written > 0
+    assert second_report.bytes_written == 0
+    assert [e.model_dump() for e in first.entries] == [e.model_dump() for e in second.entries]
+
+
+def test_crop_entries_rejects_bad_mode(tmp_path: Path) -> None:
+    manifest = _build_mixed_resolution_manifest(tmp_path, n=1)
+    with pytest.raises(ValueError, match="mode"):
+        crop_entries(manifest, tmp_path / "out", size=512, mode="bogus", progress=False)  # type: ignore[arg-type]
+
+
+def test_crop_entries_rejects_nonpositive_size(tmp_path: Path) -> None:
+    manifest = _build_mixed_resolution_manifest(tmp_path, n=1)
+    with pytest.raises(ValueError, match="size"):
+        crop_entries(manifest, tmp_path / "out", size=0, mode="center", progress=False)
+
+
+def test_crop_entries_min_side_forces_passthrough_above_size(tmp_path: Path) -> None:
+    root = tmp_path / "src"
+    (root / "real").mkdir(parents=True)
+    natural_like_image(size=(600, 600), seed=1).save(root / "real" / "a.png", format="PNG")
+    manifest, _ = build_manifest(
+        root, dataset="ds", label_of=label_from_parent_folder, progress=False
+    )
+    out_dir = tmp_path / "out"
+
+    # 600x600 is big enough to crop at size=512, but not at the stricter min_side=800.
+    _, report = crop_entries(
+        manifest, out_dir, size=512, mode="center", min_side=800, progress=False
+    )
+    assert report.passthrough == 1
+    assert report.cropped == 0
+
+
+def test_crop_entries_report_is_a_crop_report(tmp_path: Path) -> None:
+    manifest = _build_mixed_resolution_manifest(tmp_path, n=1)
+    _, report = crop_entries(manifest, tmp_path / "out", size=512, mode="center", progress=False)
+    assert isinstance(report, CropReport)

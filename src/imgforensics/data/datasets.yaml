@@ -64,7 +64,7 @@ datasets:
     task: "detection"
     homepage: "https://mever-team.github.io/itw-sm"
     download: "https://huggingface.co/datasets/dkarageo/itw-sm"
-    access: "open"
+    access: "gated"
     license: "CC BY-SA 4.0"
     commercial_ok: true
     approx_size_gb: null

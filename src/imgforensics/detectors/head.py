@@ -274,6 +274,7 @@ class CheckpointMeta(BaseModel):
     augment_config: str | None = None
     augment_hash: str
     views: int
+    train_views: Literal["all", "augmented_only"] = "all"
     head: HeadConfig
     calibration: Calibration
     best_epoch: int

@@ -232,6 +232,29 @@ def _callables_from_layout(
     return label_of, generator_of, split_of, mask_of
 
 
+def _generators_only_for_fakes(
+    label_of: Callable[[Path], Label | None],
+    generator_of: Callable[[Path], str | None] | None,
+) -> Callable[[Path], str | None]:
+    """Return a generator callable that yields ``None`` for real images.
+
+    ``generator`` names the generative model behind a fake image. Some
+    datasets store a real image's *source* (a photo collection name, or a
+    placeholder such as ``N/A``) in the same column or folder position, which
+    would turn every real image into its own "generator" group and defeat a
+    generator-disjoint split (see :func:`imgforensics.data.manifest.split_by_group`,
+    which splits ungrouped entries proportionally). Real images therefore never
+    carry a generator, whatever the layout or sidecar says.
+    """
+
+    def wrapped(path: Path) -> str | None:
+        if label_of(path) == "real" or generator_of is None:
+            return None
+        return generator_of(path)
+
+    return wrapped
+
+
 def prepare(
     dataset: str,
     src_root: str | Path,
@@ -292,6 +315,7 @@ def prepare(
     attributes = _load_attributes(root)
     if attributes:
         generator_of, split_of = _wrap_with_attributes(root, attributes, generator_of, split_of)
+    generator_of = _generators_only_for_fakes(label_of, generator_of)
 
     manifest, skipped = build_manifest(
         root,

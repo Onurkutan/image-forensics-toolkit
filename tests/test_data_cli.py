@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from conftest import natural_like_image
 from PIL import Image
 from typer.testing import CliRunner
 
 from imgforensics.cli import app
-from imgforensics.data.manifest import Manifest
+from imgforensics.data.manifest import Manifest, build_manifest, label_from_parent_folder
 
 runner = CliRunner()
 
@@ -213,3 +214,79 @@ def test_cli_manifest_merge_combines_manifests(tmp_path: Path) -> None:
     merged = Manifest.load(out_path)
     assert len(merged.entries) == 16
     assert merged.meta.dataset == "a+b"
+
+
+def test_cli_manifest_crop_center_mode_equalizes_resolution(tmp_path: Path) -> None:
+    root = tmp_path / "src"
+    (root / "real").mkdir(parents=True)
+    (root / "fake").mkdir(parents=True)
+    natural_like_image(size=(1024, 1024), seed=1).save(root / "real" / "r0.png", format="PNG")
+    natural_like_image(size=(512, 512), seed=2).save(root / "fake" / "f0.png", format="PNG")
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest, _ = build_manifest(
+        root, dataset="cli-crop", label_of=label_from_parent_folder, progress=False
+    )
+    manifest.save(manifest_path)
+
+    out_dir = tmp_path / "cropped"
+    out_path = tmp_path / "cropped.jsonl"
+    result = runner.invoke(
+        app,
+        [
+            "manifest",
+            "crop",
+            str(manifest_path),
+            "--out-dir",
+            str(out_dir),
+            "--out",
+            str(out_path),
+            "--size",
+            "512",
+            "--mode",
+            "center",
+            "--label",
+            "real",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    cropped = Manifest.load(out_path)
+    assert len(cropped.entries) == 2
+    real_entry = next(e for e in cropped.entries if e.label == "real")
+    fake_entry = next(e for e in cropped.entries if e.label == "fake")
+    assert real_entry.width == 512
+    assert real_entry.height == 512
+    assert fake_entry.width == 512
+    assert fake_entry.height == 512
+    # The fake entry, outside --label, is a byte-identical copy.
+    assert (out_dir / "fake" / "f0.png").read_bytes() == (root / "fake" / "f0.png").read_bytes()
+    assert "Crop report" in result.stdout
+
+
+def test_cli_manifest_crop_rejects_unknown_mode(tmp_path: Path) -> None:
+    root = tmp_path / "src"
+    (root / "real").mkdir(parents=True)
+    natural_like_image(size=(600, 600), seed=1).save(root / "real" / "a.png", format="PNG")
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest, _ = build_manifest(
+        root, dataset="cli-crop", label_of=label_from_parent_folder, progress=False
+    )
+    manifest.save(manifest_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "manifest",
+            "crop",
+            str(manifest_path),
+            "--out-dir",
+            str(tmp_path / "cropped"),
+            "--out",
+            str(tmp_path / "cropped.jsonl"),
+            "--size",
+            "512",
+            "--mode",
+            "bogus",
+        ],
+    )
+    assert result.exit_code != 0

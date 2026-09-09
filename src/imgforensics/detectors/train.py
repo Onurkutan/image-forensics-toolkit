@@ -41,7 +41,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -98,6 +98,19 @@ class TrainConfig(BaseModel):
             YAML, applied to training views above 0. ``None`` disables
             augmentation entirely.
         views: Views per training image (1 = the un-augmented image only).
+        train_views: Which of a training image's views enter the sample set.
+            ``"all"`` (the default) uses every view, including view 0.
+            ``"augmented_only"`` drops view 0 and trains on views 1..K-1
+            alone, which matters when one class is stored pristine (never
+            JPEG-compressed) while the other carries residual compression
+            history from whatever pipeline produced it: the clean view lets a
+            head separate the classes by compression history rather than by
+            generation artifacts, since only one class ever appears
+            unmodified. Restricting training to the augmented views forces
+            both classes through the same random re-encoding, so the only
+            systematic difference left for the head to key on is the one the
+            dataset is meant to test. Validation is unaffected -- it always
+            reads view 0 regardless of this setting.
         head: Head hyperparameters; ``n_layers`` and ``dim`` are read off the
             cached features rather than configured.
         epochs: Maximum epochs; early stopping may end the run sooner.
@@ -127,6 +140,7 @@ class TrainConfig(BaseModel):
     crop: CropPolicy = Field(default_factory=CropPolicy)
     augment: str | None = None
     views: int = Field(default=1, ge=1)
+    train_views: Literal["all", "augmented_only"] = "all"
     head: HeadOptions = Field(default_factory=HeadOptions)
     epochs: int = Field(default=20, ge=1)
     batch_size: int = Field(default=256, ge=1)
@@ -253,6 +267,8 @@ def _collect(
     extractor: FeatureExtractor,
     limit: int | None,
     progress: bool,
+    *,
+    skip_view_zero: bool = False,
 ) -> _Samples:
     """Load (computing anything missing) every view's features for one manifest.
 
@@ -261,6 +277,11 @@ def _collect(
     -- and reads them back. Results arrive in input order, exactly
     ``extractor.views`` per path, which is what lets each one be attributed to
     its image without matching on paths.
+
+    ``skip_view_zero`` drops the un-augmented view's crops from the returned
+    samples (used by ``train_head`` for ``train_views == "augmented_only"``);
+    the view is still extracted (and cached) like any other, only excluded
+    from the sample arrays.
     """
     entries = manifest.entries[:limit] if limit is not None else manifest.entries
     if not entries:
@@ -276,6 +297,9 @@ def _collect(
     for position, (_, _, features) in enumerate(
         extractor.features_for_paths(paths, cache=cache, progress=progress)
     ):
+        view = position % extractor.views
+        if skip_view_zero and view == 0:
+            continue
         image = position // extractor.views
         blocks.append(np.asarray(features, dtype=np.float32))
         n_crops = features.shape[0]
@@ -437,9 +461,16 @@ def train_head(config: TrainConfig, progress: bool = True) -> TrainReport:
     ``config.out_dir``.
 
     Raises:
-        ValueError: either manifest is empty, or the training split contains
-            only one class.
+        ValueError: either manifest is empty, the training split contains
+            only one class, or ``train_views == "augmented_only"`` with fewer
+            than two ``views`` (there would be no training samples left).
     """
+    if config.train_views == "augmented_only" and config.views < 2:
+        raise ValueError(
+            "train_views='augmented_only' requires views >= 2 "
+            f"(got views={config.views}); there would be no training samples"
+        )
+
     started = time.perf_counter()
     spec = get_backbone(config.backbone)
     device = torch.device(resolve_device(config.device))
@@ -462,6 +493,7 @@ def train_head(config: TrainConfig, progress: bool = True) -> TrainReport:
         ),
         config.max_train_images,
         progress,
+        skip_view_zero=config.train_views == "augmented_only",
     )
     # Validation always reads the un-augmented view 0: an epoch's numbers must
     # not depend on which augmentation policy the training views used.
@@ -601,6 +633,7 @@ def train_head(config: TrainConfig, progress: bool = True) -> TrainReport:
         augment_config=config.augment,
         augment_hash=NO_AUGMENT_HASH if augmentation is None else augmentation.fingerprint(),
         views=config.views,
+        train_views=config.train_views,
         head=head_config,
         calibration=calibration,
         best_epoch=best_epoch,

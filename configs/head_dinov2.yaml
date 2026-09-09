@@ -38,6 +38,13 @@ crop:
 augment: configs/augment_default.yaml
 views: 2
 
+# "all" trains on every view, including the un-augmented view 0. Switch to
+# "augmented_only" (drops view 0, needs views >= 2) when one class is stored
+# pristine and the other carries residual compression history -- otherwise a
+# head can learn to separate the classes by that history instead of by
+# generation artifacts.
+train_views: all
+
 # n_layers and dim are read off the cached features, not configured here.
 head:
   proj_dim: 256

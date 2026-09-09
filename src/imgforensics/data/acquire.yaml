@@ -23,9 +23,7 @@ recipes:
       "-Small" repository (verified via its Hugging Face dataset-server
       schema on 2026-09-09: columns image_name, format, resolution, mode,
       image_data, model_name, nsfw_flag, prompt, real_source, subset,
-      split, label, architecture). The default step bounds the download to
-      the first 8 sorted `data/*.parquet` shards -- roughly a few GB of
-      512x512 PNG rows, not the whole ~260 GB repository, which does not
+      split, label, architecture). The default step bounds the download to the first 8 sorted `data/*.parquet` shards. Shards range from about 1 GB to 4 GB each, so expect roughly 23 GB (about 24,000 images: 9,000 512x512 fakes from 227 generators and 15,000 1024x1024 reals), not the whole ~260 GB repository, which does not
       fit this project's disk budget (see docs/ROADMAP.md); pass
       `--variant full` to download every shard instead. Materializing the
       Parquet rows into a real/fake image tree needs

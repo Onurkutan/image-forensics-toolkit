@@ -99,7 +99,13 @@ instead of pulling it whole -- Community Forensics defaults to the first 8
 sorted Parquet shards of the ~260 GB `-Small` repository (`--variant full`
 for everything). `imgforensics manifest
 sample IN --n N --out OUT` draws a deterministic, stratified subsample, and
-`imgforensics manifest merge A B ... --out OUT` combines manifests. See
+`imgforensics manifest merge A B ... --out OUT` combines manifests.
+`imgforensics manifest crop IN --out-dir DIR --out OUT --size N --mode
+center|tiles [--label real ...]` writes native-resolution square crops
+(never a resize) of the selected labels into a new manifest, closing a
+resolution gap between classes -- e.g. 1024 px reals vs. 512 px fakes --
+that would otherwise let a detector learn scene scale instead of
+generation artifacts. See
 [`imgforensics.eval.metrics`](src/imgforensics/eval/metrics.py) for the
 image-level (AUC, AP, accuracy, ECE, ...) and pixel-level (F1, best-F1, AP,
 IoU) metrics used to score detectors and localizers.

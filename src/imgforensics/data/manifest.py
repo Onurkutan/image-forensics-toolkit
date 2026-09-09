@@ -15,14 +15,16 @@ import hashlib
 import math
 import random
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 from datetime import date
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from PIL import Image
 from pydantic import BaseModel, Field
 
 from imgforensics.signals.metadata import _jpeg_quality_info
+from imgforensics.utils.image_io import load_image
 
 Label = Literal["real", "fake"]
 Split = Literal["train", "val", "test"]
@@ -161,6 +163,28 @@ def _relative_posix(path: Path, root: Path) -> str:
     return candidate.resolve().relative_to(root.resolve()).as_posix()
 
 
+def _file_metadata(path: Path) -> tuple[str, int, int, str, int | None]:
+    """Read an on-disk image's ``(sha256, width, height, format, jpeg_quality)``.
+
+    Shared by :func:`build_manifest` (scanning a dataset's existing files)
+    and :func:`crop_entries` (reading back a file it just wrote or copied),
+    so every manifest entry's these five fields are computed by exactly one
+    code path regardless of which caller produced the file. Width/height/
+    format come from :func:`PIL.Image.open`, which only parses the header
+    (pixels are never decoded here); ``jpeg_quality`` is ``None`` for every
+    non-JPEG format.
+    """
+    data = path.read_bytes()
+    sha256 = hashlib.sha256(data).hexdigest()
+    with Image.open(path) as img:
+        width, height = img.size
+        fmt = img.format or path.suffix.lstrip(".").upper()
+        jpeg_quality: int | None = None
+        if fmt == "JPEG":
+            jpeg_quality = _jpeg_quality_info(img)["jpeg_quality_estimate"]
+    return sha256, width, height, fmt, jpeg_quality
+
+
 def build_manifest(
     root: str | Path,
     *,
@@ -226,14 +250,7 @@ def build_manifest(
             continue
 
         try:
-            data = file_path.read_bytes()
-            sha256 = hashlib.sha256(data).hexdigest()
-            with Image.open(file_path) as img:
-                width, height = img.size
-                fmt = img.format or file_path.suffix.lstrip(".").upper()
-                jpeg_quality: int | None = None
-                if fmt == "JPEG":
-                    jpeg_quality = _jpeg_quality_info(img)["jpeg_quality_estimate"]
+            sha256, width, height, fmt, jpeg_quality = _file_metadata(file_path)
         except Exception as exc:  # noqa: BLE001 - one bad file must not abort the build
             skipped.append(f"{file_path}: {exc}")
             continue
@@ -555,3 +572,331 @@ def merge(manifests: Sequence[Manifest]) -> Manifest:
         notes="; ".join(notes) or None,
     )
     return Manifest(meta=meta, entries=entries)
+
+
+@dataclass
+class CropReport:
+    """Result of :func:`crop_entries`.
+
+    ``cropped`` counts source entries that were selected and large enough
+    to crop -- one per *entry*, regardless of mode. ``tiles_written``
+    additionally counts the individual tile files produced in
+    ``mode="tiles"`` (always ``0`` in ``mode="center"``, since a center
+    crop is not a tile). ``passthrough`` counts selected entries too small
+    to crop (copied through unchanged instead), ``copied`` counts entries
+    excluded by ``labels`` (also copied through unchanged), and
+    ``skipped_unreadable`` counts entries whose source file could not be
+    read at all -- one bad file does not abort the run, mirroring
+    :func:`build_manifest`. ``bytes_written`` totals the size of files
+    actually written to disk during this call; a destination file already
+    present from an earlier, interrupted run is left untouched (see the
+    idempotence note on :func:`crop_entries`) and does not add to it.
+    """
+
+    cropped: int = 0
+    tiles_written: int = 0
+    passthrough: int = 0
+    copied: int = 0
+    skipped_unreadable: int = 0
+    bytes_written: int = 0
+
+
+def _copy_through(source_path: Path, dest_path: Path) -> bool:
+    """Byte-copy ``source_path`` to ``dest_path`` unless it is already there.
+
+    Returns whether bytes were actually written -- ``False`` when
+    ``dest_path`` already existed, which is what keeps :func:`crop_entries`
+    idempotent across repeated calls.
+    """
+    if dest_path.exists():
+        return False
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    dest_path.write_bytes(source_path.read_bytes())
+    return True
+
+
+def _save_crop(image: Image.Image, dest_path: Path) -> bool:
+    """Save ``image`` as a lossless PNG at ``dest_path`` unless already there.
+
+    Returns whether the file was actually written, for the same
+    idempotence reason as :func:`_copy_through`.
+    """
+    if dest_path.exists():
+        return False
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(dest_path, format="PNG")
+    return True
+
+
+def _cropped_entry(
+    source_entry: ManifestEntry,
+    dest_path: Path,
+    *,
+    new_path: str,
+    crop_mode: str | None,
+    crop_size: int | None,
+    tile_index: int | None,
+    original_width: int,
+    original_height: int,
+) -> ManifestEntry:
+    """Build one output-manifest entry from a file :func:`crop_entries` just wrote or copied.
+
+    ``sha256``/``width``/``height``/``format``/``jpeg_quality`` all come
+    from re-reading ``dest_path`` via :func:`_file_metadata` -- the same
+    helper :func:`build_manifest` uses -- rather than from arithmetic that
+    could drift from what actually ended up on disk.
+    """
+    sha256, width, height, fmt, jpeg_quality = _file_metadata(dest_path)
+    return ManifestEntry(
+        path=new_path,
+        label=source_entry.label,
+        source=source_entry.source,
+        generator=source_entry.generator,
+        split=source_entry.split,
+        mask_path=None,
+        sha256=sha256,
+        width=width,
+        height=height,
+        format=fmt,
+        jpeg_quality=jpeg_quality,
+        extra={
+            "source_path": source_entry.path,
+            "crop_mode": crop_mode,
+            "crop_size": crop_size,
+            "tile_index": tile_index,
+            "original_width": original_width,
+            "original_height": original_height,
+        },
+    )
+
+
+def crop_entries(
+    manifest: Manifest,
+    out_dir: str | Path,
+    *,
+    size: int,
+    mode: Literal["center", "tiles"],
+    labels: Sequence[Label] | None = None,
+    min_side: int | None = None,
+    progress: bool = True,
+) -> tuple[Manifest, CropReport]:
+    """Crop selected entries to native-resolution ``size`` x ``size`` squares.
+
+    This closes a resolution gap between classes without resampling. A
+    dataset whose real images run at 1024 px and whose fakes run at 512 px
+    lets a detector learn scene scale instead of generation artifacts (see
+    ``imgforensics.data.audit``'s resolution-bucket check, which is exactly
+    what this is meant to make disappear). Cutting the larger class down to
+    native-resolution square crops of the smaller class's size removes that
+    gap without resampling -- resizing would itself leave a detectable
+    low-pass trace, trading one shortcut for another.
+
+    For every entry whose ``label`` is in ``labels`` (every entry, when
+    ``labels`` is ``None``):
+
+    - ``mode="center"``: one ``size`` x ``size`` crop at the image's
+      center.
+    - ``mode="tiles"``: every non-overlapping ``size`` x ``size`` tile,
+      row-major (``_t00``, ``_t01``, ...); a trailing partial row/column
+      that does not fill a whole tile is dropped.
+
+    Eligibility is read from the *source* manifest's own recorded
+    ``width``/``height`` -- no need to open a file just to decide whether to
+    crop it -- against ``size``, or, when given, ``max(size, min_side)``.
+    ``min_side`` is a stricter floor than ``size`` itself, useful when a
+    crop taken right at the size boundary would sit too close to the
+    image's edge to trust (e.g. compression artifacts concentrated there).
+    An entry below that floor is copied through unchanged instead and
+    counted as ``passthrough`` in the returned report, exactly like an
+    entry outside ``labels`` (counted as ``copied``) -- either way the
+    output manifest stays a complete dataset, just with some entries
+    untouched.
+
+    Pixels are never resampled. EXIF orientation is applied once, via
+    :func:`imgforensics.utils.image_io.load_image`, before the crop is
+    taken (so an entry's post-orientation size can differ from its source
+    manifest's recorded, pre-orientation ``width``/``height`` in the rare
+    case of a rotated image; the eligibility check above still uses the
+    recorded values, since it must decide whether to open the file at
+    all). Every cropped output is saved as a lossless PNG regardless of the
+    input's format -- this tool is meant to be run on one label at a time
+    (or on classes that already share a format), and a format mismatch it
+    introduces itself is exactly what
+    :func:`imgforensics.data.audit.audit_manifest` will flag on the result.
+
+    Output tree, under ``out_dir``: a crop is written to ``<source path
+    without its extension>[_tNN].png`` (no suffix in ``mode="center"``); a
+    passthrough or not-selected entry keeps its original relative path
+    unchanged. (Two source entries that differ only in extension, e.g.
+    ``a.jpg`` and ``a.png``, would collide at that stripped-extension path
+    -- an edge case this function does not guard against.)
+
+    Every output entry keeps its source entry's ``label``, ``source``,
+    ``generator`` and ``split``; ``mask_path`` is always ``None`` (this
+    tool does not crop masks), and ``meta.notes`` gets a note when any
+    source entry had one, since the association would otherwise silently
+    go stale. ``extra`` records ``source_path`` (the original relative
+    path) and ``original_width``/``original_height``; for entries actually
+    subject to this crop job -- selected by ``labels``, whether cropped or
+    passed through for being too small -- it also records ``crop_mode`` and
+    ``crop_size``, and ``tile_index`` (the tile's position in
+    ``mode="tiles"``, else ``None``). An entry excluded by ``labels`` never
+    had cropping attempted at all, so ``crop_mode``/``crop_size`` are
+    ``None`` for it.
+
+    Idempotent: a destination file that already exists is left untouched
+    (not re-decoded, re-cropped, or re-copied), so an interrupted run can
+    be resumed by calling this again with the same ``out_dir``.
+    Deterministic: entries are processed in source-path order, and a
+    source image's tiles are written in row-major order, so the returned
+    manifest's entry order (and thus its saved byte content, since
+    :meth:`Manifest.save` sorts by path) never depends on filesystem
+    iteration order.
+
+    Args:
+        manifest: Source manifest; its ``meta.root`` locates every entry's
+            source file.
+        out_dir: Destination directory for the new image tree.
+        size: Crop edge length in pixels.
+        mode: ``"center"`` or ``"tiles"``.
+        labels: Only these labels are cropped; every other entry is copied
+            through unchanged. ``None`` (the default) selects every label.
+        min_side: Optional stricter floor than ``size`` for crop
+            eligibility (see above).
+        progress: When true, print a one-line progress count as entries are
+            processed, matching :func:`build_manifest`'s convention.
+
+    Returns:
+        A ``(manifest, report)`` tuple. The returned manifest's
+        ``meta.root`` is ``out_dir``; ``meta.notes`` gets
+        ``"cropped <labels> to <size> (<mode>) from <dataset>"``.
+
+    Raises:
+        ValueError: ``size`` is not positive, or ``mode`` is neither
+            ``"center"`` nor ``"tiles"``.
+    """
+    if mode not in ("center", "tiles"):
+        raise ValueError(f"mode must be 'center' or 'tiles', got {mode!r}")
+    if size <= 0:
+        raise ValueError(f"size must be positive, got {size}")
+
+    # Imported here, not at module scope: imgforensics.eval (via
+    # eval.runner) imports imgforensics.data.manifest, so importing
+    # eval.preprocess at module scope would be a circular import.
+    from imgforensics.eval.preprocess import center_crop, grid_crops
+
+    out_dir = Path(out_dir).resolve()
+    root = Path(manifest.meta.root)
+    label_set = set(labels) if labels is not None else None
+    threshold = size if min_side is None else max(size, min_side)
+
+    entries_sorted = sorted(manifest.entries, key=lambda entry: entry.path)
+    report = CropReport()
+    new_entries: list[ManifestEntry] = []
+    had_mask = False
+    total = len(entries_sorted)
+
+    for index, entry in enumerate(entries_sorted, start=1):
+        if progress and (index % 500 == 0 or index == total):
+            print(f"[crop] {index}/{total} entries processed")
+        if entry.mask_path is not None:
+            had_mask = True
+
+        source_path = root / entry.path
+        selected = label_set is None or entry.label in label_set
+
+        if not selected:
+            dest_path = out_dir / entry.path
+            try:
+                wrote = _copy_through(source_path, dest_path)
+            except OSError:
+                report.skipped_unreadable += 1
+                continue
+            if wrote:
+                report.bytes_written += dest_path.stat().st_size
+            report.copied += 1
+            new_entries.append(
+                _cropped_entry(
+                    entry,
+                    dest_path,
+                    new_path=entry.path,
+                    crop_mode=None,
+                    crop_size=None,
+                    tile_index=None,
+                    original_width=entry.width,
+                    original_height=entry.height,
+                )
+            )
+            continue
+
+        if min(entry.width, entry.height) < threshold:
+            dest_path = out_dir / entry.path
+            try:
+                wrote = _copy_through(source_path, dest_path)
+            except OSError:
+                report.skipped_unreadable += 1
+                continue
+            if wrote:
+                report.bytes_written += dest_path.stat().st_size
+            report.passthrough += 1
+            new_entries.append(
+                _cropped_entry(
+                    entry,
+                    dest_path,
+                    new_path=entry.path,
+                    crop_mode=mode,
+                    crop_size=size,
+                    tile_index=None,
+                    original_width=entry.width,
+                    original_height=entry.height,
+                )
+            )
+            continue
+
+        try:
+            image = load_image(source_path)
+        except Exception:  # noqa: BLE001 - one bad file must not abort the run
+            report.skipped_unreadable += 1
+            continue
+        actual_width, actual_height = image.size
+
+        tiles: list[tuple[int | None, Image.Image]]
+        if mode == "center":
+            tiles = [(None, center_crop(image, size))]
+        else:
+            tiles_x = actual_width // size
+            tiles_y = actual_height // size
+            grid = grid_crops(image, size, max_crops=max(1, tiles_x * tiles_y))
+            tiles = list(enumerate(grid))
+
+        stem = PurePosixPath(entry.path).with_suffix("").as_posix()
+        report.cropped += 1
+        for tile_index, cropped_image in tiles:
+            new_path = f"{stem}.png" if tile_index is None else f"{stem}_t{tile_index:02d}.png"
+            dest_path = out_dir / new_path
+            wrote = _save_crop(cropped_image, dest_path)
+            if wrote:
+                report.bytes_written += dest_path.stat().st_size
+            if tile_index is not None:
+                report.tiles_written += 1
+            new_entries.append(
+                _cropped_entry(
+                    entry,
+                    dest_path,
+                    new_path=new_path,
+                    crop_mode=mode,
+                    crop_size=size,
+                    tile_index=tile_index,
+                    original_width=actual_width,
+                    original_height=actual_height,
+                )
+            )
+
+    labels_desc = ",".join(labels) if labels else "all"
+    note = f"cropped {labels_desc} to {size} ({mode}) from {manifest.meta.dataset}"
+    if had_mask:
+        note += "; source manifest had mask(s), not carried over (masks are not cropped)"
+    new_meta = manifest.meta.model_copy(
+        update={"root": str(out_dir), "notes": _combine_notes(manifest.meta.notes, note)}
+    )
+    return Manifest(meta=new_meta, entries=new_entries), report

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal, cast
 
 import numpy as np
 import typer
@@ -24,6 +24,7 @@ from imgforensics.data import (
     Manifest,
     audit_manifest,
     build_manifest,
+    crop_entries,
     fetch,
     get_dataset,
     get_recipe,
@@ -711,6 +712,7 @@ def train_head_command(
     table.add_row("device", config.device)
     table.add_row("head parameters", f"{report.head_parameters:,}")
     table.add_row("train crops / images", f"{report.train_crops} / {report.train_images}")
+    table.add_row("train views", meta.train_views)
     table.add_row("val crops / images", f"{report.val_crops} / {report.val_images}")
     table.add_row("epochs run (best)", f"{meta.epochs_run} ({meta.best_epoch})")
     table.add_row("val AUC", f"{meta.val.auc:.4f}")
@@ -864,6 +866,71 @@ def manifest_split(
     console.print(f"  {by} groups: {', '.join(_groups(train)) or '<none>'}")
     console.print(f"Wrote {len(val.entries)} val entries to {out_val}")
     console.print(f"  {by} groups: {', '.join(_groups(val)) or '<none>'}")
+
+
+@manifest_app.command("crop")
+def manifest_crop(
+    in_path: Annotated[
+        Path,
+        typer.Argument(exists=True, dir_okay=False, readable=True, help="Input manifest .jsonl."),
+    ],
+    out_dir: Annotated[
+        Path, typer.Option("--out-dir", help="Directory to write cropped/copied images into.")
+    ],
+    out: Annotated[Path, typer.Option("--out", help="Path to write the new manifest to.")],
+    size: Annotated[int, typer.Option("--size", help="Crop edge length in pixels.")],
+    mode: Annotated[
+        str,
+        typer.Option(
+            "--mode", help="'center' (one crop per image) or 'tiles' (every non-overlapping tile)."
+        ),
+    ] = "center",
+    label: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--label", help="Only crop entries with this label (repeatable); default: every label."
+        ),
+    ] = None,
+    min_side: Annotated[
+        int | None,
+        typer.Option(
+            "--min-side",
+            help="Stricter floor than --size for crop eligibility; smaller images pass through.",
+        ),
+    ] = None,
+) -> None:
+    """Crop a manifest to a native resolution, no resampling (see manifest.crop_entries)."""
+    if mode not in ("center", "tiles"):
+        raise typer.BadParameter(f"--mode must be 'center' or 'tiles', got {mode!r}.")
+    unknown_labels = sorted({name for name in (label or []) if name not in ("real", "fake")})
+    if unknown_labels:
+        raise typer.BadParameter(f"Unknown label(s): {', '.join(unknown_labels)}. Use real/fake.")
+
+    manifest = Manifest.load(in_path)
+    labels = cast("list[Literal['real', 'fake']] | None", label) if label else None
+    cropped_manifest, report = crop_entries(
+        manifest,
+        out_dir,
+        size=size,
+        mode=cast('Literal["center", "tiles"]', mode),
+        labels=labels,
+        min_side=min_side,
+        progress=False,
+    )
+    cropped_manifest.save(out)
+
+    table = Table(title="Crop report")
+    table.add_column("field", style="bold")
+    table.add_column("value")
+    table.add_row("cropped images", str(report.cropped))
+    table.add_row("tiles written", str(report.tiles_written))
+    table.add_row("passthrough", str(report.passthrough))
+    table.add_row("copied", str(report.copied))
+    table.add_row("skipped (unreadable)", str(report.skipped_unreadable))
+    table.add_row("bytes written", f"{report.bytes_written:,}")
+    console.print(table)
+    console.print(f"Wrote {len(cropped_manifest.entries)} entries to {out}")
+    console.print(json.dumps(cropped_manifest.summary(), indent=2))
 
 
 if __name__ == "__main__":

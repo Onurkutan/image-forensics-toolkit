@@ -210,6 +210,9 @@ def test_checkpoint_json_describes_the_run_end_to_end(trained: tuple[TrainConfig
     assert document["commercial_ok"] is True
     assert document["licenses"] == ["CC-BY-4.0"]
 
+    # Default config trains on every view; recorded in the checkpoint.
+    assert document["train_views"] == "all"
+
 
 def test_calibration_does_not_make_the_probabilities_worse(
     trained: tuple[TrainConfig, Path],
@@ -239,6 +242,31 @@ def test_the_same_seed_reproduces_the_same_run(trained: tuple[TrainConfig, Path]
     assert [record.val_auc for record in first.epochs] == pytest.approx(
         [record.val_auc for record in second.epochs], abs=1e-6
     )
+
+
+def test_augmented_only_trains_on_views_1_and_up(trained: tuple[TrainConfig, Path]) -> None:
+    config, tmp_path = trained
+    config = config.model_copy(
+        update={"train_views": "augmented_only", "out_dir": tmp_path / "checkpoint-augmented"}
+    )
+
+    report = train_head(config, progress=False)
+
+    # views=2 in the fixture, so only view 1 remains: images x (views-1) x crops.
+    assert report.train_crops == 64 * (2 - 1) * _CROPS_PER_IMAGE
+    assert report.train_images == 64
+    assert report.meta.train_views == "augmented_only"
+
+    document = json.loads(Path(report.metadata_path).read_text(encoding="utf-8"))
+    assert document["train_views"] == "augmented_only"
+
+
+def test_augmented_only_requires_at_least_two_views(trained: tuple[TrainConfig, Path]) -> None:
+    config, _ = trained
+    config = config.model_copy(update={"train_views": "augmented_only", "views": 1})
+
+    with pytest.raises(ValueError, match="augmented_only"):
+        train_head(config, progress=False)
 
 
 def test_a_single_class_training_manifest_is_rejected(tmp_path: Path) -> None:
