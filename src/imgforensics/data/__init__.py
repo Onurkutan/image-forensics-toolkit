@@ -31,6 +31,7 @@ from imgforensics.data.acquire import (
 from imgforensics.data.audit import AuditReport, BiasError, audit_manifest
 from imgforensics.data.layouts import (
     Layout,
+    MaterializeReport,
     get_layout,
     load_layouts,
     materialize_parquet,
@@ -44,6 +45,7 @@ from imgforensics.data.manifest import (
     label_from_parent_folder,
     merge,
     sample,
+    split_by_group,
 )
 from imgforensics.data.registry import (
     DatasetInfo,
@@ -65,6 +67,7 @@ __all__ = [
     "Manifest",
     "ManifestEntry",
     "ManifestMeta",
+    "MaterializeReport",
     "audit_manifest",
     "build_manifest",
     "fetch",
@@ -80,4 +83,5 @@ __all__ = [
     "prepare",
     "registry_table_markdown",
     "sample",
+    "split_by_group",
 ]

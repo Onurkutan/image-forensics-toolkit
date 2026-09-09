@@ -368,6 +368,124 @@ def sample(
     return Manifest(meta=new_meta, entries=selected)
 
 
+def _combine_notes(existing: str | None, addition: str) -> str:
+    return f"{existing}; {addition}" if existing else addition
+
+
+def split_by_group(
+    manifest: Manifest,
+    *,
+    group_field: str = "generator",
+    val_fraction: float = 0.2,
+    seed: int = 0,
+    holdout: list[str] | None = None,
+) -> tuple[Manifest, Manifest]:
+    """Split ``manifest`` into two group-disjoint halves (train, val).
+
+    Every entry's group is ``getattr(entry, group_field)`` (``generator`` by
+    default). Entries whose group is ``None`` -- typically real images,
+    which usually carry no generator -- never determine the group
+    assignment below; instead they are shuffled (seeded from ``seed``) and
+    split proportionally to ``val_fraction`` at random, so *both* returned
+    manifests contain some of them.
+
+    For every other (non-``None``) group, exactly one of the two returned
+    manifests gets *all* of that group's entries -- no generator straddles
+    the train/val boundary:
+
+    - When ``holdout`` is given, every group named in it goes entirely to
+      the second (val) manifest, and every other group entirely to the
+      first (train) manifest.
+    - Otherwise, groups are deterministically shuffled (seeded from
+      ``seed``) and then greedily assigned largest-first: a group is added
+      to val (in that shuffled, size-descending order) until val's running
+      entry count reaches ``val_fraction`` of the total grouped entries, so
+      the val group set ends up holding *about* -- rarely exactly, since
+      whole groups cannot be split -- that fraction.
+
+    Every returned entry has ``split`` set to ``"train"`` or ``"val"``
+    accordingly (via :meth:`ManifestEntry.model_copy`, so the input
+    manifest's entries are untouched), and both manifests' ``meta.notes``
+    gets a note describing how the split was made.
+
+    Args:
+        manifest: Source manifest.
+        group_field: :class:`ManifestEntry` field name to group by.
+        val_fraction: Target fraction of non-``None``-group entries (and,
+            independently, of ``None``-group entries) assigned to val.
+        seed: Seed for the deterministic group shuffle/assignment and the
+            random split of ``None``-group entries.
+        holdout: When given, exact group names to force entirely into val,
+            instead of the size-based greedy assignment.
+
+    Returns:
+        ``(train_manifest, val_manifest)``.
+    """
+    grouped: dict[str, list[ManifestEntry]] = {}
+    ungrouped: list[ManifestEntry] = []
+    for entry in manifest.entries:
+        value = getattr(entry, group_field)
+        if value is None:
+            ungrouped.append(entry)
+        else:
+            grouped.setdefault(str(value), []).append(entry)
+
+    total_grouped = sum(len(v) for v in grouped.values())
+    if holdout is not None:
+        holdout_set = set(holdout)
+        val_groups = {name for name in grouped if name in holdout_set}
+        val_grouped_count = sum(len(grouped[name]) for name in val_groups)
+        note = (
+            f"split_by_group: field={group_field!r}, holdout={sorted(holdout_set)} "
+            f"-> {len(val_groups)} group(s), {val_grouped_count} of {total_grouped} "
+            f"grouped entries into val"
+        )
+    else:
+        group_names = sorted(grouped)
+        rng = random.Random(_stratum_seed(seed, (group_field, "group-shuffle")))
+        rng.shuffle(group_names)
+        ordered = sorted(group_names, key=lambda name: -len(grouped[name]))
+        target = round(val_fraction * total_grouped)
+        val_groups = set()
+        running = 0
+        for name in ordered:
+            if running >= target:
+                break
+            val_groups.add(name)
+            running += len(grouped[name])
+        note = (
+            f"split_by_group: field={group_field!r}, val_fraction={val_fraction}, seed={seed} "
+            f"-> {len(val_groups)} group(s), {running} of {total_grouped} grouped entries into val "
+            "(whole groups only, largest-first greedy assignment)"
+        )
+
+    train_entries: list[ManifestEntry] = []
+    val_entries: list[ManifestEntry] = []
+    for name, entries in grouped.items():
+        (val_entries if name in val_groups else train_entries).extend(entries)
+
+    ungrouped_sorted = sorted(ungrouped, key=lambda entry: entry.path)
+    indices = list(range(len(ungrouped_sorted)))
+    random.Random(_stratum_seed(seed, (group_field, "ungrouped-split"))).shuffle(indices)
+    ungrouped_val_count = round(val_fraction * len(ungrouped_sorted))
+    val_positions = set(indices[:ungrouped_val_count])
+    for position, entry in enumerate(ungrouped_sorted):
+        (val_entries if position in val_positions else train_entries).append(entry)
+
+    train_entries = [e.model_copy(update={"split": "train"}) for e in train_entries]
+    val_entries = [e.model_copy(update={"split": "val"}) for e in val_entries]
+
+    train_meta = manifest.meta.model_copy(
+        update={"notes": _combine_notes(manifest.meta.notes, note)}
+    )
+    val_meta = manifest.meta.model_copy(update={"notes": _combine_notes(manifest.meta.notes, note)})
+
+    return (
+        Manifest(meta=train_meta, entries=train_entries),
+        Manifest(meta=val_meta, entries=val_entries),
+    )
+
+
 def merge(manifests: Sequence[Manifest]) -> Manifest:
     """Concatenate several manifests' entries into one.
 

@@ -38,6 +38,7 @@ code).
 | c2pa-python | `provenance` | MIT OR Apache-2.0 | yes |
 | huggingface_hub | `data` | Apache-2.0 | yes |
 | gdown | `data` | MIT | yes |
+| pyarrow | `data` | Apache-2.0 | yes |
 | torch | `ml` | BSD-3-Clause | yes |
 | torchvision | `ml` | BSD-3-Clause | yes |
 | timm | `ml` | Apache-2.0 | yes |

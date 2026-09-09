@@ -15,6 +15,7 @@ from imgforensics.data.manifest import (
     label_from_parent_folder,
     merge,
     sample,
+    split_by_group,
 )
 
 
@@ -400,3 +401,107 @@ def test_merge_result_round_trips_through_save_load(tmp_path: Path) -> None:
     merged.save(out_path)
     loaded = Manifest.load(out_path)
     assert len(loaded.entries) == 2
+
+
+# --- split_by_group() --------------------------------------------------------
+
+
+def _grouped_manifest() -> Manifest:
+    entries: list[ManifestEntry] = []
+    counter = 0
+    for generator, count in {"A": 10, "B": 8, "C": 6, "D": 4}.items():
+        for i in range(count):
+            entries.append(
+                _entry(
+                    f"fake/{generator}/{i}.jpg",
+                    "fake",
+                    generator=generator,
+                    sha=f"{counter:064d}",
+                )
+            )
+            counter += 1
+    for i in range(20):
+        entries.append(_entry(f"real/{i}.jpg", "real", sha=f"{counter:064d}"))
+        counter += 1
+    meta = ManifestMeta(dataset="ds", root="/root", created="2026-01-01")
+    return Manifest(meta=meta, entries=entries)
+
+
+def test_split_by_group_is_generator_disjoint() -> None:
+    manifest = _grouped_manifest()
+    train, val = split_by_group(manifest, seed=0)
+
+    train_generators = {e.generator for e in train.entries if e.generator is not None}
+    val_generators = {e.generator for e in val.entries if e.generator is not None}
+    assert train_generators & val_generators == set()
+    assert train_generators | val_generators == {"A", "B", "C", "D"}
+
+
+def test_split_by_group_keeps_reals_in_both_halves() -> None:
+    manifest = _grouped_manifest()
+    train, val = split_by_group(manifest, seed=0)
+
+    train_reals = [e for e in train.entries if e.generator is None]
+    val_reals = [e for e in val.entries if e.generator is None]
+    assert train_reals
+    assert val_reals
+    assert len(train_reals) + len(val_reals) == 20
+
+
+def test_split_by_group_sets_split_field_on_every_entry() -> None:
+    manifest = _grouped_manifest()
+    train, val = split_by_group(manifest, seed=0)
+
+    assert train.entries and val.entries
+    assert all(e.split == "train" for e in train.entries)
+    assert all(e.split == "val" for e in val.entries)
+
+
+def test_split_by_group_notes_describe_the_split() -> None:
+    manifest = _grouped_manifest()
+    train, val = split_by_group(manifest, seed=0)
+
+    assert train.meta.notes is not None
+    assert "split_by_group" in train.meta.notes
+    assert train.meta.notes == val.meta.notes
+
+
+def test_split_by_group_holdout_forces_named_groups_into_val() -> None:
+    manifest = _grouped_manifest()
+    train, val = split_by_group(manifest, holdout=["B"])
+
+    val_generators = {e.generator for e in val.entries if e.generator is not None}
+    train_generators = {e.generator for e in train.entries if e.generator is not None}
+    assert val_generators == {"B"}
+    assert train_generators == {"A", "C", "D"}
+
+
+def test_split_by_group_is_deterministic_for_the_same_seed() -> None:
+    manifest = _grouped_manifest()
+    train1, val1 = split_by_group(manifest, seed=3)
+    train2, val2 = split_by_group(manifest, seed=3)
+
+    assert [e.path for e in train1.entries] == [e.path for e in train2.entries]
+    assert [e.path for e in val1.entries] == [e.path for e in val2.entries]
+
+
+def test_split_by_group_ungrouped_split_differs_across_seeds() -> None:
+    manifest = _grouped_manifest()
+    _, val1 = split_by_group(manifest, seed=0)
+    _, val2 = split_by_group(manifest, seed=1)
+
+    val_reals_1 = {e.path for e in val1.entries if e.generator is None}
+    val_reals_2 = {e.path for e in val2.entries if e.generator is None}
+    assert val_reals_1 != val_reals_2
+
+
+def test_split_by_group_never_splits_a_group_across_both_halves() -> None:
+    manifest = _grouped_manifest()
+    train, val = split_by_group(manifest, val_fraction=0.35, seed=0)
+
+    train_paths_by_generator: dict[str, set[str]] = {}
+    for entry in train.entries:
+        if entry.generator is not None:
+            train_paths_by_generator.setdefault(entry.generator, set()).add(entry.path)
+    val_generators = {e.generator for e in val.entries if e.generator is not None}
+    assert set(train_paths_by_generator) & val_generators == set()

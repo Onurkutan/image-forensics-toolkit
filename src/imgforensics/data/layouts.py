@@ -19,11 +19,13 @@ plain ``*``, which already crosses ``/`` on its own -- see
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -280,146 +282,409 @@ def prepare(
             f"[prepare] no layout registered for {dataset!r}; "
             "falling back to label_from_parent_folder"
         )
-        manifest, skipped = build_manifest(
-            root,
-            dataset=dataset,
-            label_of=label_from_parent_folder,
-            license=resolved_license,
-            commercial_ok=resolved_commercial_ok,
-            progress=False,
-        )
+        label_of: Callable[[Path], Label | None] = label_from_parent_folder
+        generator_of: Callable[[Path], str | None] | None = None
+        split_of: Callable[[Path], Split | None] | None = None
+        mask_of: Callable[[Path], Path | None] | None = None
     else:
         label_of, generator_of, split_of, mask_of = _callables_from_layout(layout, root)
-        manifest, skipped = build_manifest(
-            root,
-            dataset=dataset,
-            label_of=label_of,
-            generator_of=generator_of,
-            split_of=split_of,
-            mask_of=mask_of,
-            license=resolved_license,
-            commercial_ok=resolved_commercial_ok,
-            progress=False,
-        )
+
+    attributes = _load_attributes(root)
+    if attributes:
+        generator_of, split_of = _wrap_with_attributes(root, attributes, generator_of, split_of)
+
+    manifest, skipped = build_manifest(
+        root,
+        dataset=dataset,
+        label_of=label_of,
+        generator_of=generator_of,
+        split_of=split_of,
+        mask_of=mask_of,
+        license=resolved_license,
+        commercial_ok=resolved_commercial_ok,
+        progress=False,
+    )
 
     manifest.save(out_path)
     report = audit_manifest(manifest, strict=False)
     return manifest, skipped, report
 
 
+#: Name of the sidecar file :func:`materialize_parquet` writes next to the
+#: image tree, and that :func:`prepare` looks for at ``<src_root>/attributes.jsonl``.
+_ATTRIBUTES_FILENAME = "attributes.jsonl"
+
+
+def _load_attributes(src_root: Path) -> dict[str, dict[str, Any]]:
+    """Load ``<src_root>/attributes.jsonl`` (see :func:`materialize_parquet`), if present.
+
+    Returns a ``{root-relative POSIX path: record}`` mapping, or an empty
+    dict when the file does not exist. A line that fails to parse as JSON or
+    carries no ``"path"`` key is skipped rather than aborting the whole load.
+    """
+    path = src_root / _ATTRIBUTES_FILENAME
+    if not path.is_file():
+        return {}
+    records: dict[str, dict[str, Any]] = {}
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            rel_path = record.get("path")
+            if isinstance(rel_path, str):
+                records[rel_path] = record
+    return records
+
+
+def _wrap_with_attributes(
+    root: Path,
+    attributes: dict[str, dict[str, Any]],
+    generator_of: Callable[[Path], str | None] | None,
+    split_of: Callable[[Path], Split | None] | None,
+) -> tuple[Callable[[Path], str | None], Callable[[Path], Split | None]]:
+    """Prefer ``attributes.jsonl``'s ``model_name``/``split`` over the folder-derived values.
+
+    Falls back to ``generator_of``/``split_of`` (the layout- or
+    ``label_from_parent_folder``-derived callables, which may themselves be
+    ``None``) for any path the sidecar has no record for, or whose record
+    leaves the field unset -- so a partially-covered sidecar never loses
+    information the folder structure would otherwise have provided.
+    """
+
+    def wrapped_generator_of(path: Path) -> str | None:
+        record = attributes.get(_relative_posix(path, root))
+        if record is not None:
+            model_name = record.get("model_name")
+            if model_name:
+                return str(model_name)
+        return generator_of(path) if generator_of is not None else None
+
+    def wrapped_split_of(path: Path) -> Split | None:
+        record = attributes.get(_relative_posix(path, root))
+        if record is not None:
+            split_value = record.get("split")
+            if split_value in _SPLIT_VALUES:
+                return split_value  # type: ignore[return-value]
+        return split_of(path) if split_of is not None else None
+
+    return wrapped_generator_of, wrapped_split_of
+
+
 # --- Community Forensics Small: Parquet materialization -------------------
 
 #: Column names verified against the OwensLab/CommunityForensics-Small
-#: dataset-server schema (2026-09-09): image bytes, integer label (1 =
-#: generated/fake, 0 = real, matching this dataset's own convention), the
-#: generator name, and the train/val/test split, all present per row so no
-#: folder-name inference is needed once materialized.
-_PARQUET_IMAGE_COLUMN = "image_data"
-_PARQUET_LABEL_COLUMN = "label"
-_PARQUET_GENERATOR_COLUMN = "model_name"
-_PARQUET_SPLIT_COLUMN = "split"
+#: dataset-server schema (2026-09-09): image_name, format, resolution, mode,
+#: image_data, model_name, nsfw_flag, prompt, real_source, subset, split,
+#: label, architecture. ``resolution``/``mode`` are not needed to
+#: materialize a row and are not read.
 _PARQUET_NAME_COLUMN = "image_name"
+_PARQUET_FORMAT_COLUMN = "format"
+_PARQUET_IMAGE_COLUMN = "image_data"
+_PARQUET_GENERATOR_COLUMN = "model_name"
+_PARQUET_NSFW_COLUMN = "nsfw_flag"
+_PARQUET_PROMPT_COLUMN = "prompt"
+_PARQUET_REAL_SOURCE_COLUMN = "real_source"
+_PARQUET_SUBSET_COLUMN = "subset"
+_PARQUET_SPLIT_COLUMN = "split"
+_PARQUET_LABEL_COLUMN = "label"
+_PARQUET_ARCHITECTURE_COLUMN = "architecture"
+
+#: Columns actually read from each shard (a strict subset of the schema
+#: above keeps the per-batch memory footprint down).
+_PARQUET_COLUMNS = (
+    _PARQUET_NAME_COLUMN,
+    _PARQUET_FORMAT_COLUMN,
+    _PARQUET_IMAGE_COLUMN,
+    _PARQUET_GENERATOR_COLUMN,
+    _PARQUET_NSFW_COLUMN,
+    _PARQUET_PROMPT_COLUMN,
+    _PARQUET_REAL_SOURCE_COLUMN,
+    _PARQUET_SUBSET_COLUMN,
+    _PARQUET_SPLIT_COLUMN,
+    _PARQUET_LABEL_COLUMN,
+    _PARQUET_ARCHITECTURE_COLUMN,
+)
+#: Columns without which a row cannot be materialized at all.
+_PARQUET_REQUIRED_COLUMNS = (
+    _PARQUET_NAME_COLUMN,
+    _PARQUET_FORMAT_COLUMN,
+    _PARQUET_IMAGE_COLUMN,
+    _PARQUET_LABEL_COLUMN,
+)
+
+#: Row-group batch size for :func:`materialize_parquet`'s streaming read --
+#: small enough that a whole shard is never resident in memory at once.
+_PARQUET_BATCH_SIZE = 512
+#: Extension to write when a row's ``format`` value isn't a recognized name.
+_UNKNOWN_FORMAT_EXTENSION = "bin"
+#: Longest a stored ``prompt`` attribute may be (characters).
+_PROMPT_TRUNCATE_LENGTH = 200
+
+_FORMAT_EXTENSIONS: dict[str, str] = {
+    "PNG": "png",
+    "JPEG": "jpg",
+    "JPG": "jpg",
+    "WEBP": "webp",
+    "BMP": "bmp",
+    "TIFF": "tiff",
+    "TIF": "tiff",
+    "GIF": "gif",
+}
+
+
+@dataclass
+class MaterializeReport:
+    """Outcome of one :func:`materialize_parquet` call.
+
+    ``skipped`` counts rows that were read but not written, keyed by reason
+    (``"nsfw"``, ``"missing_image_data"``, ``"already_exists"``).
+    ``by_label``/``by_generator``/``formats`` count every row that was (or
+    already had been) materialized -- i.e. everything not skipped -- keyed
+    by the manifest ``label`` it maps to, the folder-name generator it was
+    written under, and its raw ``format`` column value, respectively.
+    """
+
+    rows_read: int = 0
+    written: int = 0
+    skipped: dict[str, int] = field(default_factory=dict)
+    by_label: dict[str, int] = field(default_factory=dict)
+    by_generator: dict[str, int] = field(default_factory=dict)
+    formats: dict[str, int] = field(default_factory=dict)
+
+    @staticmethod
+    def _bump(counts: dict[str, int], key: str) -> None:
+        counts[key] = counts.get(key, 0) + 1
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "rows_read": self.rows_read,
+            "written": self.written,
+            "skipped": self.skipped,
+            "by_label": self.by_label,
+            "by_generator": self.by_generator,
+            "formats": self.formats,
+        }
+
+
+def _extension_for_format(fmt: str | None) -> str:
+    """The lower-case file extension to write for a Parquet ``format`` value.
+
+    Falls back to the lower-cased raw value for a format not in the known
+    table (still deterministic, still a valid extension for most strings),
+    or :data:`_UNKNOWN_FORMAT_EXTENSION` when ``fmt`` is empty/``None``.
+    """
+    if not fmt:
+        return _UNKNOWN_FORMAT_EXTENSION
+    key = fmt.strip().upper()
+    return _FORMAT_EXTENSIONS.get(key, key.lower())
+
+
+def _label_to_dir(value: Any) -> Label:
+    """Map a raw ``label`` column value to ``"real"``/``"fake"``.
+
+    Community Forensics Small's own dataset-server schema uses ``1`` =
+    generated/fake, ``0`` = real, but a Parquet shard from a different
+    export could carry ``"real"``/``"fake"`` strings or booleans instead --
+    all three are handled. ``bool`` is checked before ``int`` because
+    Python's ``bool`` is an ``int`` subclass and would otherwise match the
+    integer branch first (harmlessly here, since ``True``/``False`` compare
+    equal to ``1``/``0``, but the explicit check keeps the mapping obvious).
+
+    Raises:
+        ValueError: ``value`` is not a recognized label encoding, naming
+            the offending value and its type -- this fails loudly rather
+            than silently guessing a label.
+    """
+    if isinstance(value, bool):
+        return "fake" if value else "real"
+    if isinstance(value, int):
+        if value == 1:
+            return "fake"
+        if value == 0:
+            return "real"
+        raise ValueError(f"Unrecognized integer label value {value!r} (expected 0 or 1)")
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered == "fake":
+            return "fake"
+        if lowered == "real":
+            return "real"
+        raise ValueError(f"Unrecognized string label value {value!r} (expected 'real' or 'fake')")
+    raise ValueError(
+        f"Unrecognized label value {value!r} of type {type(value).__name__} "
+        "(expected an int 0/1, a bool, or a 'real'/'fake' string)"
+    )
 
 
 def materialize_parquet(
-    parquet_dir: str | Path,
+    src_dir: str | Path,
     out_dir: str | Path,
     *,
-    image_column: str = _PARQUET_IMAGE_COLUMN,
-    label_column: str = _PARQUET_LABEL_COLUMN,
-    generator_column: str = _PARQUET_GENERATOR_COLUMN,
-    split_column: str = _PARQUET_SPLIT_COLUMN,
-    name_column: str = _PARQUET_NAME_COLUMN,
-    fake_label_value: int = 1,
-) -> int:
-    """Materialize Parquet-shard rows (Community Forensics Small's format) into a folder tree.
+    max_rows: int | None = None,
+    progress: bool = True,
+) -> MaterializeReport:
+    """Materialize Community Forensics Small's Parquet shards into a real/fake image tree.
 
-    Community Forensics Small ships as Parquet shards
-    (``data/*.parquet``) rather than a real/fake image tree, so
-    :func:`prepare` cannot walk it directly. This helper reads every
-    ``*.parquet`` file in ``parquet_dir`` and writes each row's image bytes
-    to ``<out_dir>/<real|fake>/<generator or "unknown">/<split or "none">/<image_name>``.
-    That shape matches the packaged ``layouts.yaml`` entry for "Community
-    Forensics" (``real_globs``/``fake_globs`` of ``real/**``/``fake/**``,
-    ``generator_from: grandparent``, ``split_from: parent``) -- so after
-    materializing, ``prepare("Community Forensics", out_dir, ...)`` walks
-    the result directly.
+    Community Forensics Small ships as Parquet shards (``data/*.parquet``)
+    rather than a real/fake image tree, so :func:`prepare` cannot walk it
+    directly. This reads every ``*.parquet`` file in ``src_dir`` one row
+    group at a time (via :class:`pyarrow.parquet.ParquetFile`, never
+    ``read_table`` on a whole shard) and, for each row:
 
-    Requires ``pyarrow`` (not an imgforensics dependency -- deliberately
-    excluded, see ``docs/ROADMAP.md`` section 3's small-dependency
-    principle). When it is not installed, this prints manual instructions
-    and returns ``0`` instead of raising, matching this project's pattern
-    of degrading to instructions rather than failing hard on an optional
-    extra (see ``imgforensics.signals.c2pa``).
+    - Skips it (counted under ``skipped["nsfw"]``) when ``nsfw_flag`` is true.
+    - Skips it (``skipped["missing_image_data"]``) when ``image_data`` is
+      ``None``.
+    - Maps ``label`` to ``real``/``fake`` with :func:`_label_to_dir` --
+      raising loudly on an unrecognized value rather than guessing.
+    - Writes the row's raw ``image_data`` bytes unchanged (no re-encoding)
+      to ``<out_dir>/<real|fake>/<generator>/<split>/<image_name>.<ext>``,
+      where ``generator`` is ``model_name`` for a fake row and
+      ``real_source`` (or ``"real"`` when unset) for a real row, ``split``
+      falls back to ``"none"`` when unset, and ``ext`` comes from the
+      ``format`` column via :func:`_extension_for_format`. That shape
+      matches the packaged ``layouts.yaml`` entry for "Community Forensics"
+      (``generator_from: grandparent``, ``split_from: parent``), so
+      ``prepare("Community Forensics", out_dir, ...)`` walks the result
+      directly.
+    - Is skipped (``skipped["already_exists"]``) instead of rewritten when
+      the target file already exists -- re-running this on a partially (or
+      fully) materialized ``out_dir`` is safe and cheap.
+
+    Also writes ``<out_dir>/attributes.jsonl``, one JSON line per row that
+    maps to a file present in ``out_dir`` after this call (whether just
+    written or already there), recording that file's root-relative path
+    plus ``model_name``, ``architecture``, ``subset``, ``split`` and a
+    ``prompt`` truncated to :data:`_PROMPT_TRUNCATE_LENGTH` characters --
+    see :func:`prepare`, which prefers this sidecar's ``model_name``/
+    ``split`` over the folder-derived ones when it exists. And
+    ``<out_dir>/materialize.json``, a JSON dump of the returned
+    :class:`MaterializeReport`.
+
+    Requires ``pyarrow`` (the optional ``data`` extra -- deliberately kept
+    out of the base dependency set, see ``docs/ROADMAP.md`` section 3's
+    small-dependency principle). When it is not installed, this prints
+    manual instructions and returns an all-zero :class:`MaterializeReport`
+    instead of raising, matching this project's pattern of degrading to
+    instructions rather than failing hard on an optional extra (see
+    ``imgforensics.signals.c2pa``).
 
     Args:
-        parquet_dir: Directory containing the downloaded ``*.parquet`` shards.
-        out_dir: Destination folder tree.
-        image_column: Column holding raw image bytes.
-        label_column: Column whose value equals ``fake_label_value`` for a
-            generated image, anything else for real.
-        generator_column: Column holding the generator/model name.
-        split_column: Column holding the train/val/test split name.
-        name_column: Column holding the output file's base name.
-        fake_label_value: The label value that means "fake"/generated.
+        src_dir: Directory containing the downloaded ``*.parquet`` shards.
+        out_dir: Destination folder tree (created if missing).
+        max_rows: Stop after reading this many rows total, across every
+            shard (sorted by filename); ``None`` reads every row of every
+            shard.
+        progress: Print a running row count every :data:`_PARQUET_BATCH_SIZE`
+            rows.
 
-    Returns:
-        Number of images written (``0`` when pyarrow is unavailable).
+    Raises:
+        ValueError: a shard is missing one of the columns in
+            :data:`_PARQUET_REQUIRED_COLUMNS`, or a row's ``label`` value is
+            not recognized by :func:`_label_to_dir`.
     """
     try:
         import pyarrow.parquet as pq
     except ImportError:
         print(
-            "[materialize_parquet] pyarrow is not installed; install it manually "
-            "(pip install pyarrow) or use the Hugging Face `datasets` library to "
-            "read the Parquet shards yourself, then write "
-            "<out_dir>/<real|fake>/<generator>/<name> per row."
+            "[materialize_parquet] pyarrow is not installed; install it with "
+            'pip install "imgforensics[data]" (or `pip install pyarrow` directly), '
+            "or use the Hugging Face `datasets` library to read the Parquet shards "
+            "yourself, then write <out_dir>/<real|fake>/<generator>/<split>/<name> "
+            "per row."
         )
-        return 0
+        return MaterializeReport()
 
-    parquet_dir = Path(parquet_dir)
+    src_dir = Path(src_dir)
     out_dir = Path(out_dir)
-    written = 0
-    for shard_path in sorted(parquet_dir.glob("*.parquet")):
-        table = pq.read_table(shard_path)
-        columns = {
-            image_column: table.column(image_column),
-            label_column: table.column(label_column),
-            generator_column: table.column(generator_column)
-            if generator_column in table.column_names
-            else None,
-            split_column: table.column(split_column)
-            if split_column in table.column_names
-            else None,
-            name_column: table.column(name_column) if name_column in table.column_names else None,
-        }
-        num_rows = table.num_rows
-        for row in range(num_rows):
-            image_bytes = columns[image_column][row].as_py()
-            if image_bytes is None:
-                continue
-            label_value = columns[label_column][row].as_py()
-            label_dir = "fake" if label_value == fake_label_value else "real"
-            generator = (
-                columns[generator_column][row].as_py()
-                if columns[generator_column] is not None
-                else None
-            )
-            generator_dir = generator or "unknown"
-            name = (
-                columns[name_column][row].as_py()
-                if columns[name_column] is not None
-                else f"{shard_path.stem}_{row}.png"
-            )
-            split_value = (
-                columns[split_column][row].as_py() if columns[split_column] is not None else None
-            )
-            # Always emit a split segment (default "none") so every image sits at the
-            # same path depth -- the layout's fixed generator_from="grandparent" /
-            # split_from="parent" would otherwise misread a variable-depth path.
-            split_dir = split_value or "none"
-            target_dir = out_dir / label_dir / generator_dir / split_dir
-            target_dir.mkdir(parents=True, exist_ok=True)
-            (target_dir / name).write_bytes(image_bytes)
-            written += 1
-    return written
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    report = MaterializeReport()
+    attribute_lines: list[str] = []
+    rows_seen = 0
+
+    for shard_path in sorted(src_dir.glob("*.parquet")):
+        if max_rows is not None and rows_seen >= max_rows:
+            break
+
+        parquet_file = pq.ParquetFile(shard_path)
+        available = set(parquet_file.schema_arrow.names)
+        missing_required = [c for c in _PARQUET_REQUIRED_COLUMNS if c not in available]
+        if missing_required:
+            raise ValueError(f"{shard_path}: missing required column(s) {missing_required}")
+        read_columns = [c for c in _PARQUET_COLUMNS if c in available]
+
+        for batch in parquet_file.iter_batches(
+            batch_size=_PARQUET_BATCH_SIZE, columns=read_columns
+        ):
+            if max_rows is not None and rows_seen >= max_rows:
+                break
+            for row in batch.to_pylist():
+                if max_rows is not None and rows_seen >= max_rows:
+                    break
+                rows_seen += 1
+                report.rows_read += 1
+                if progress and report.rows_read % _PARQUET_BATCH_SIZE == 0:
+                    print(f"[materialize_parquet] {report.rows_read} rows read")
+
+                if bool(row.get(_PARQUET_NSFW_COLUMN)):
+                    report._bump(report.skipped, "nsfw")
+                    continue
+
+                image_bytes = row.get(_PARQUET_IMAGE_COLUMN)
+                if image_bytes is None:
+                    report._bump(report.skipped, "missing_image_data")
+                    continue
+
+                label = _label_to_dir(row.get(_PARQUET_LABEL_COLUMN))
+                model_name = row.get(_PARQUET_GENERATOR_COLUMN)
+                real_source = row.get(_PARQUET_REAL_SOURCE_COLUMN)
+                generator = str(model_name if label == "fake" else (real_source or "real"))
+
+                split_value = row.get(_PARQUET_SPLIT_COLUMN)
+                split_dir = str(split_value) if split_value else "none"
+
+                fmt_value = row.get(_PARQUET_FORMAT_COLUMN)
+                report._bump(report.formats, str(fmt_value) if fmt_value else "unknown")
+                extension = _extension_for_format(fmt_value)
+
+                name_value = row[_PARQUET_NAME_COLUMN]
+                target_dir = out_dir / label / generator / split_dir
+                target_path = target_dir / f"{name_value}.{extension}"
+
+                report._bump(report.by_label, label)
+                report._bump(report.by_generator, generator)
+
+                if target_path.exists():
+                    report._bump(report.skipped, "already_exists")
+                else:
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    target_path.write_bytes(image_bytes)
+                    report.written += 1
+
+                prompt_value = row.get(_PARQUET_PROMPT_COLUMN)
+                if isinstance(prompt_value, str):
+                    prompt_value = prompt_value[:_PROMPT_TRUNCATE_LENGTH]
+                attribute_lines.append(
+                    json.dumps(
+                        {
+                            "path": target_path.relative_to(out_dir).as_posix(),
+                            "model_name": model_name,
+                            "architecture": row.get(_PARQUET_ARCHITECTURE_COLUMN),
+                            "subset": row.get(_PARQUET_SUBSET_COLUMN),
+                            "split": split_value,
+                            "prompt": prompt_value,
+                        }
+                    )
+                )
+
+    attributes_text = "".join(f"{line}\n" for line in attribute_lines)
+    (out_dir / "attributes.jsonl").write_text(attributes_text, encoding="utf-8")
+    (out_dir / "materialize.json").write_text(
+        json.dumps(report.to_dict(), indent=2), encoding="utf-8"
+    )
+    return report

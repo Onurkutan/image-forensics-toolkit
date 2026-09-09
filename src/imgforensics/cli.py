@@ -29,9 +29,11 @@ from imgforensics.data import (
     get_recipe,
     label_from_parent_folder,
     load_registry,
+    materialize_parquet,
     merge,
     prepare,
     sample,
+    split_by_group,
 )
 from imgforensics.detectors import BACKBONES, CropPolicy, FeatureCache, FeatureExtractor
 from imgforensics.detectors.features import extract_to_cache
@@ -470,6 +472,55 @@ def datasets_prepare(
         raise typer.Exit(code=1)
 
 
+@datasets_app.command("materialize")
+def datasets_materialize(
+    name: Annotated[
+        str,
+        typer.Argument(
+            help=(
+                "Dataset name (currently only 'Community Forensics' ships a Parquet materializer)."
+            )
+        ),
+    ],
+    src: Annotated[
+        Path,
+        typer.Option(
+            "--src",
+            exists=True,
+            file_okay=False,
+            readable=True,
+            help="Directory containing the downloaded *.parquet shards.",
+        ),
+    ],
+    out: Annotated[
+        Path, typer.Option("--out", help="Destination folder tree to materialize into.")
+    ],
+    max_rows: Annotated[
+        int | None,
+        typer.Option("--max-rows", help="Stop after this many rows total, across all shards."),
+    ] = None,
+) -> None:
+    """Materialize Community Forensics' Parquet shards into a real/fake image tree."""
+    if name != "Community Forensics":
+        console.print(
+            f"[yellow]No Parquet materializer is registered for {name!r}; "
+            "only 'Community Forensics' is supported today.[/yellow]"
+        )
+    report = materialize_parquet(src, out, max_rows=max_rows, progress=True)
+
+    table = Table(title=f"Materialize report: {name}")
+    table.add_column("field", style="bold")
+    table.add_column("value")
+    table.add_row("rows read", str(report.rows_read))
+    table.add_row("written", str(report.written))
+    table.add_row("skipped", json.dumps(report.skipped))
+    table.add_row("by_label", json.dumps(report.by_label))
+    table.add_row("by_generator", json.dumps(report.by_generator))
+    table.add_row("formats", json.dumps(report.formats))
+    console.print(table)
+    console.print(f"Wrote {out / 'materialize.json'} and {out / 'attributes.jsonl'}")
+
+
 def _require_ml() -> None:
     """Exit with a clear message when the optional ``ml`` extra is missing."""
     if not detectors.is_ml_available():
@@ -765,6 +816,54 @@ def manifest_merge(
     merged = merge(manifests)
     merged.save(out)
     console.print(f"Wrote {len(merged.entries)} entries (from {len(manifests)} manifests) to {out}")
+
+
+@manifest_app.command("split")
+def manifest_split(
+    in_path: Annotated[
+        Path,
+        typer.Argument(exists=True, dir_okay=False, readable=True, help="Input manifest .jsonl."),
+    ],
+    out_train: Annotated[
+        Path, typer.Option("--out-train", help="Path to write the train-half manifest to.")
+    ],
+    out_val: Annotated[
+        Path, typer.Option("--out-val", help="Path to write the val-half manifest to.")
+    ],
+    by: Annotated[
+        str,
+        typer.Option("--by", help="ManifestEntry field to split by, group-disjoint."),
+    ] = "generator",
+    val_fraction: Annotated[
+        float,
+        typer.Option(
+            "--val-fraction", help="Target fraction of grouped (and of ungrouped) entries in val."
+        ),
+    ] = 0.2,
+    holdout: Annotated[
+        list[str] | None,
+        typer.Option("--holdout", help="Group name to force entirely into val (repeatable)."),
+    ] = None,
+    seed: Annotated[
+        int, typer.Option("--seed", help="Seed for the deterministic group shuffle/assignment.")
+    ] = 0,
+) -> None:
+    """Split a manifest into group-disjoint train/val halves (see manifest.split_by_group)."""
+    manifest = Manifest.load(in_path)
+    train, val = split_by_group(
+        manifest, group_field=by, val_fraction=val_fraction, seed=seed, holdout=holdout
+    )
+    train.save(out_train)
+    val.save(out_val)
+
+    def _groups(side: Manifest) -> list[str]:
+        values = (getattr(entry, by) for entry in side.entries)
+        return sorted({value for value in values if value is not None})
+
+    console.print(f"Wrote {len(train.entries)} train entries to {out_train}")
+    console.print(f"  {by} groups: {', '.join(_groups(train)) or '<none>'}")
+    console.print(f"Wrote {len(val.entries)} val entries to {out_val}")
+    console.print(f"  {by} groups: {', '.join(_groups(val)) or '<none>'}")
 
 
 if __name__ == "__main__":

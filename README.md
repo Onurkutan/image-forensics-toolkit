@@ -222,7 +222,9 @@ fact survives the move from data to model.
 
 ## Roadmap
 
-See [docs/ROADMAP.md](docs/ROADMAP.md).
+See [docs/ROADMAP.md](docs/ROADMAP.md). Step-by-step runbooks for individual
+experiments (what to run, expected disk footprint, what to report) live in
+[docs/experiments/](docs/experiments/).
 
 ## Research notes
 
