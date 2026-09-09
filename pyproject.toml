@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "imgforensics"
+version = "0.1.0"
+description = "A toolkit to detect AI-generated images, AI-inpainted regions, and classic manipulations (splicing/copy-move)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Onur Kutan" },
+]
+keywords = [
+    "image-forensics",
+    "deepfake-detection",
+    "ai-generated-images",
+    "image-manipulation-detection",
+    "computer-vision",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+]
+dependencies = [
+    "numpy>=1.24",
+    "pillow>=10",
+    "opencv-python-headless>=4.8",
+    "typer>=0.12",
+    "rich>=13",
+    "pydantic>=2.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov",
+    "ruff>=0.5",
+    "mypy>=1.8",
+]
+api = [
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+]
+demo = [
+    "gradio>=4",
+]
+ml = [
+    "torch>=2.2",
+    "torchvision>=0.17",
+]
+
+[project.urls]
+Homepage = "https://github.com/Onurkutan/image-forensics-toolkit"
+Issues = "https://github.com/Onurkutan/image-forensics-toolkit/issues"
+
+[project.scripts]
+imgforensics = "imgforensics.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["imgforensics"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+packages = ["imgforensics"]
