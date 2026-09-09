@@ -102,6 +102,12 @@ measured the same way from its first training run.
 - Every signal registered as a detector; CLI prints per-signal cards; JSON output flag.
 - **Done when:** each signal has unit tests on synthetic fixtures (self-made spliced and
   re-saved images) and documented failure modes, including behaviour on laundered images.
+- **Result (2026-09-09):** seven signals shipped (`metadata`, `ela`, `c2pa`, `sd_watermark`,
+  `copy_move`, `jpeg_ghost`, `double_jpeg`), 93 tests, all seven run in about 5.5 s on a
+  12-megapixel JPEG. Notable findings: the Stable Diffusion watermark lives only in chroma
+  and does not survive any JPEG save; the blocking-grid check decays into noise above
+  quality 85; only coarse-then-fine double compression is detectable; ELA and JPEG ghost
+  are capped so they can never assert "fake" alone.
 
 ### Phase 2 — Data and evaluation infrastructure
 
@@ -116,6 +122,15 @@ measured the same way from its first training run.
 - Metrics and benchmark runner producing Markdown tables.
 - **Done when:** a trivial baseline and one public pretrained model (SIDBench member or
   SPAI) run through the full protocol and the tables are committed.
+- **Result (2026-09-09):** manifests with a `.meta.json` sidecar, a registry of 26 datasets
+  verified against primary sources with `commercial_ok` and `verified_on` fields, the bias
+  audit (Jensen-Shannon distance on format, resolution, JPEG quality and aspect ratio plus
+  duplicate detection), pure-numpy metrics with a strict `score > threshold` convention so
+  an abstaining 0.5 is not a fake call, a 15-level deterministic robustness suite,
+  training-time augmentation helpers, trivial baselines, the benchmark runner with Markdown
+  reports, and license-gated dataset fetching with layout adapters and manifest sampling.
+  360 tests. The pretrained-model part of the exit criterion moves to Phase 3, where the
+  first learned detector is benchmarked through this harness.
 
 ### Phase 3 — Whole-image AI-generated detector
 
