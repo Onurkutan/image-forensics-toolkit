@@ -143,6 +143,17 @@ measured the same way from its first training run.
 - **Done when:** cross-generator results on Synthbuster, ITW-SM/WildRF (and Chameleon if
   access is granted), the robustness table and the per-year decay chart are in
   `docs/benchmarks/`.
+- **Result of experiment 01 (2026-09-10):** frozen DINOv2 ViT-B/14 plus a 1.06 M-parameter
+  multi-layer head, trained on 8 shards of Community Forensics Small with a generator-disjoint
+  split, reaches AUC 1.000 on 42 unseen generators of the same family and then fails outside
+  it: AUC 0.459 on WildRF and a 99.9% false-positive rate on COCO photographs. The head learned
+  the training set's real-image sources, not generation artifacts; see
+  [`docs/benchmarks/01_experiment_summary.md`](benchmarks/01_experiment_summary.md). The
+  harness caught it because foreign test sets are part of the protocol. Experiment 02 changes
+  the data (diverse reals, augmented-only training views, mixed-source calibration), not the
+  model. Also found: the crop-never-resize policy breaks below the crop size (AUC 0.57 at
+  quarter scale), and the classical signals are the benchmark bottleneck (about 270 ms per
+  512 px image on one core) and need parallel workers.
 
 ### Phase 4 — Manipulation localization
 

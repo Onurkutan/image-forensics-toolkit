@@ -20,9 +20,9 @@ imgforensics datasets fetch "Community Forensics" --dest data/raw --accept-licen
 
 Uses the default recipe step (`max_files: 8`), not `--variant full` -- the packaged
 note already bounds this to the first 8 sorted Parquet shards instead of the full
-~260 GB `-Small` repository. **Disk:** a few GB (the registry's own estimate for 8
-shards of 512x512 PNG rows); read `datasets recipe "Community Forensics"` for the
-exact plan before running.
+~260 GB `-Small` repository. **Disk:** about 23 GB for the 8 shards (1 GB to 4 GB each; about 24,000 images, with
+512x512 fakes and 1024x1024 reals, see step 3a); read `datasets recipe "Community Forensics"`
+for the exact plan before running.
 
 ### 2. Materialize the Parquet shards into an image tree
 
