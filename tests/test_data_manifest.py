@@ -13,6 +13,8 @@ from imgforensics.data.manifest import (
     ManifestMeta,
     build_manifest,
     label_from_parent_folder,
+    merge,
+    sample,
 )
 
 
@@ -203,3 +205,198 @@ def test_manifest_summary(tmp_path: Path) -> None:
     assert summary["generator"] == {"none": 5}
     assert summary["split"] == {"none": 5}
     assert summary["format"] == {"JPEG": 3, "PNG": 2}
+
+
+# --- sample() ----------------------------------------------------------------
+
+
+def _entry(
+    path: str, label: str, *, generator: str | None = None, sha: str | None = None
+) -> ManifestEntry:
+    return ManifestEntry(
+        path=path,
+        label=label,  # type: ignore[arg-type]
+        source="ds",
+        generator=generator,
+        sha256=sha or ("a" * 63 + "0"),
+        width=10,
+        height=10,
+        format="JPEG",
+    )
+
+
+def _stratified_manifest() -> Manifest:
+    entries = [_entry(f"real/{i}.jpg", "real", sha=f"{i:064d}") for i in range(60)]
+    entries += [
+        _entry(f"fake/sdxl/{i}.jpg", "fake", generator="sdxl", sha=f"{1000 + i:064d}")
+        for i in range(20)
+    ]
+    entries += [
+        _entry(f"fake/dalle3/{i}.jpg", "fake", generator="dalle3", sha=f"{2000 + i:064d}")
+        for i in range(20)
+    ]
+    meta = ManifestMeta(dataset="ds", root="/root", created="2026-01-01")
+    return Manifest(meta=meta, entries=entries)
+
+
+def test_sample_is_deterministic_for_the_same_seed() -> None:
+    manifest = _stratified_manifest()
+    first = sample(manifest, 20, seed=0)
+    second = sample(manifest, 20, seed=0)
+    assert [e.path for e in first.entries] == [e.path for e in second.entries]
+
+
+def test_sample_differs_across_seeds() -> None:
+    manifest = _stratified_manifest()
+    first = sample(manifest, 20, seed=0)
+    second = sample(manifest, 20, seed=1)
+    assert [e.path for e in first.entries] != [e.path for e in second.entries]
+
+
+def test_sample_is_proportionally_stratified() -> None:
+    manifest = _stratified_manifest()
+    sampled = sample(manifest, 20, seed=0, stratify_by=("label", "generator"))
+    counts: dict[tuple[str, str], int] = {}
+    for entry in sampled.entries:
+        key = (entry.label, entry.generator or "none")
+        counts[key] = counts.get(key, 0) + 1
+    # 60/20/20 split of 100 -> proportional shares of 20 are 12/4/4.
+    assert counts == {("real", "none"): 12, ("fake", "sdxl"): 4, ("fake", "dalle3"): 4}
+
+
+def test_sample_never_exceeds_available_entries() -> None:
+    manifest = _stratified_manifest()
+    sampled = sample(manifest, 10_000, seed=0)
+    assert len(sampled.entries) == len(manifest.entries)
+
+
+def test_sample_never_exceeds_a_strata_available_count() -> None:
+    entries = [_entry("real/0.jpg", "real", sha="0" * 64)]
+    entries += [_entry(f"fake/{i}.jpg", "fake", sha=f"{i + 1:064d}") for i in range(99)]
+    meta = ManifestMeta(dataset="ds", root="/root", created="2026-01-01")
+    manifest = Manifest(meta=meta, entries=entries)
+
+    sampled = sample(manifest, 50, seed=0, stratify_by=("label",))
+    by_label: dict[str, int] = {}
+    for entry in sampled.entries:
+        by_label[entry.label] = by_label.get(entry.label, 0) + 1
+    assert by_label.get("real", 0) <= 1
+    assert len(sampled.entries) == 50
+
+
+def test_sample_meta_records_a_note() -> None:
+    manifest = _stratified_manifest()
+    sampled = sample(manifest, 20, seed=7)
+    assert sampled.meta.notes == "sampled 20 of 100 with seed 7"
+    # Everything else about meta is preserved.
+    assert sampled.meta.dataset == manifest.meta.dataset
+    assert sampled.meta.root == manifest.meta.root
+
+
+def test_sample_appends_to_existing_notes() -> None:
+    manifest = _stratified_manifest()
+    manifest.meta.notes = "original note"
+    sampled = sample(manifest, 5, seed=0)
+    assert sampled.meta.notes == "original note; sampled 5 of 100 with seed 0"
+
+
+# --- merge() -------------------------------------------------------------
+
+
+def test_merge_requires_at_least_one_manifest() -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        merge([])
+
+
+def test_merge_same_root_keeps_relative_paths() -> None:
+    meta_a = ManifestMeta(
+        dataset="a", root="/data/root", created="2026-01-01", license="MIT", commercial_ok=True
+    )
+    meta_b = ManifestMeta(
+        dataset="b", root="/data/root", created="2026-01-01", license="MIT", commercial_ok=True
+    )
+    manifest_a = Manifest(meta=meta_a, entries=[_entry("x/1.jpg", "real", sha="1" * 64)])
+    manifest_b = Manifest(meta=meta_b, entries=[_entry("y/2.jpg", "fake", sha="2" * 64)])
+
+    merged = merge([manifest_a, manifest_b])
+
+    assert len(merged.entries) == 2
+    assert {e.path for e in merged.entries} == {"x/1.jpg", "y/2.jpg"}
+    assert merged.meta.root == "/data/root"
+    assert merged.meta.dataset == "a+b"
+    assert merged.meta.license == "MIT"
+    assert merged.meta.commercial_ok is True
+    assert merged.meta.notes is None
+
+
+def test_merge_different_roots_stores_absolute_paths_and_notes() -> None:
+    meta_a = ManifestMeta(dataset="a", root="/data/root_a", created="2026-01-01")
+    meta_b = ManifestMeta(dataset="b", root="/data/root_b", created="2026-01-01")
+    manifest_a = Manifest(meta=meta_a, entries=[_entry("x/1.jpg", "real", sha="1" * 64)])
+    manifest_b = Manifest(
+        meta=meta_b,
+        entries=[
+            ManifestEntry(
+                path="y/2.jpg",
+                label="fake",
+                source="b",
+                sha256="2" * 64,
+                width=10,
+                height=10,
+                format="JPEG",
+                mask_path="masks/2.png",
+            )
+        ],
+    )
+
+    merged = merge([manifest_a, manifest_b])
+
+    paths = {e.path for e in merged.entries}
+    assert paths == {"/data/root_a/x/1.jpg", "/data/root_b/y/2.jpg"}
+    mask_entry = next(e for e in merged.entries if e.path == "/data/root_b/y/2.jpg")
+    assert mask_entry.mask_path == "/data/root_b/masks/2.png"
+    assert "different roots" in merged.meta.notes
+
+
+def test_merge_commercial_ok_is_false_if_any_input_is_false() -> None:
+    meta_a = ManifestMeta(dataset="a", root="/r", created="2026-01-01", commercial_ok=True)
+    meta_b = ManifestMeta(dataset="b", root="/r", created="2026-01-01", commercial_ok=False)
+    manifest_a = Manifest(meta=meta_a, entries=[])
+    manifest_b = Manifest(meta=meta_b, entries=[])
+    merged = merge([manifest_a, manifest_b])
+    assert merged.meta.commercial_ok is False
+
+
+def test_merge_commercial_ok_is_true_only_if_all_true() -> None:
+    meta_a = ManifestMeta(dataset="a", root="/r", created="2026-01-01", commercial_ok=True)
+    meta_b = ManifestMeta(dataset="b", root="/r", created="2026-01-01", commercial_ok=True)
+    merged = merge([Manifest(meta=meta_a, entries=[]), Manifest(meta=meta_b, entries=[])])
+    assert merged.meta.commercial_ok is True
+
+
+def test_merge_commercial_ok_is_none_when_mixed_true_and_unknown() -> None:
+    meta_a = ManifestMeta(dataset="a", root="/r", created="2026-01-01", commercial_ok=True)
+    meta_b = ManifestMeta(dataset="b", root="/r", created="2026-01-01", commercial_ok=None)
+    merged = merge([Manifest(meta=meta_a, entries=[]), Manifest(meta=meta_b, entries=[])])
+    assert merged.meta.commercial_ok is None
+
+
+def test_merge_disagreeing_licenses_are_left_unset_with_a_note() -> None:
+    meta_a = ManifestMeta(dataset="a", root="/r", created="2026-01-01", license="MIT")
+    meta_b = ManifestMeta(dataset="b", root="/r", created="2026-01-01", license="CC-BY-4.0")
+    merged = merge([Manifest(meta=meta_a, entries=[]), Manifest(meta=meta_b, entries=[])])
+    assert merged.meta.license is None
+    assert "disagreed on license" in merged.meta.notes
+
+
+def test_merge_result_round_trips_through_save_load(tmp_path: Path) -> None:
+    meta_a = ManifestMeta(dataset="a", root="/r", created="2026-01-01")
+    meta_b = ManifestMeta(dataset="b", root="/r", created="2026-01-01")
+    manifest_a = Manifest(meta=meta_a, entries=[_entry("x/1.jpg", "real", sha="1" * 64)])
+    manifest_b = Manifest(meta=meta_b, entries=[_entry("y/2.jpg", "fake", sha="2" * 64)])
+    merged = merge([manifest_a, manifest_b])
+
+    out_path = tmp_path / "merged.jsonl"
+    merged.save(out_path)
+    loaded = Manifest.load(out_path)
+    assert len(loaded.entries) == 2

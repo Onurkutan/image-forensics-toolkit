@@ -1,0 +1,131 @@
+# Dataset layout adapters (see imgforensics.data.layouts).
+#
+# Each entry describes one downloaded dataset's on-disk folder shape so
+# `prepare()` can build a manifest without a bespoke script per dataset.
+# `dataset` should match a `datasets.yaml` registry name (or, for
+# "Community Forensics" here, the shape produced by
+# `imgforensics.data.layouts.materialize_parquet` -- see its note below).
+#
+# A dataset is only listed here once its folder structure was confirmed
+# against a primary source (its README, dataset card, or an HTTP fetch of
+# its download page) -- see each entry's `notes` for what was checked and
+# when. CocoGlide is deliberately *not* listed: its acquisition recipe
+# (acquire.yaml) has a verified http URL, but the extracted zip's internal
+# folder layout is not documented anywhere reachable, so guessing globs for
+# it here would be worse than omitting it.
+
+layouts:
+  - dataset: "Synthbuster"
+    real_globs: []
+    fake_globs: ["*/*"]
+    generator_from: "parent"
+    split_from: "none"
+    mask_template: null
+    exclude_globs: []
+    notes: >-
+      The archive (synthbuster.zip) holds only the 9 generators' fake
+      images, one folder per generator; build_manifest's own extension
+      filter (.jpg/.jpeg/.png/.webp/.tif/.tiff) does the file-type
+      narrowing, so the glob itself is left generic rather than guessing
+      exact generator folder names (not documented in the repo README as
+      of 2026-09-09). Real images (RAISE-1k) are a separate download
+      (registry entry "RAISE") with no documented pairing folder --
+      prepare() on this root alone yields a fake-only manifest, which the
+      bias audit will (correctly) flag as single-label.
+
+  - dataset: "COCO"
+    real_globs: ["val2017/**", "train2017/**"]
+    fake_globs: []
+    generator_from: "none"
+    split_from: "top"
+    split_map: { "val2017": "val", "train2017": "train" }
+    mask_template: null
+    exclude_globs: ["annotations/**"]
+    notes: >-
+      COCO is a real-image source only in this project (registry task
+      "real-source"); the annotations zip (JSON, no images) is excluded
+      rather than scanned. No masks.
+
+  - dataset: "CASIA v2.0"
+    real_globs: ["Au/**"]
+    fake_globs: ["Tp/**"]
+    generator_from: "none"
+    split_from: "none"
+    mask_template: "Gt/{stem}_gt.png"
+    exclude_globs: ["Gt/**"]
+    notes: >-
+      Folder names (Au/Tp/Gt) and the "<tampered stem>_gt.png" mask
+      convention verified against the corrected-groundtruth mirror READMEs
+      (SunnyHaze/CASIA2.0-Corrected-Groundtruth, namtpham/casia2groundtruth)
+      on 2026-09-09. The registry's format-bias warning applies here:
+      about 60% of tampered images are TIFF while authentic images are
+      JPEG/BMP -- re-encode both classes identically before training on
+      this manifest, not just before evaluating on it.
+
+  - dataset: "TGIF"
+    real_globs: ["original/**"]
+    fake_globs: ["SD2-sp/**", "PS-sp/**", "SD2-fr/**", "SDXL-fr/**"]
+    generator_from: "regex"
+    generator_regex: "^(?P<gen>[^/]+)/"
+    split_from: "regex"
+    split_regex: "/(?P<split>training|validation|testing)/"
+    split_map: { "training": "train", "validation": "val", "testing": "test" }
+    mask_template: null
+    exclude_globs: []
+    notes: >-
+      Top-level folder names (masks, original, SD2-sp, PS-sp, SD2-fr,
+      SDXL-fr) and the training/validation/testing split-per-folder
+      structure are verified against the project README on 2026-09-09;
+      TGIF2's additional flux1*/masks-* folders are not covered here (add
+      them to fake_globs once downloaded). mask_template is deliberately
+      left unset: the README documents multiple mask-naming variants
+      (mask type -- bbox/segm/random -- crossed with crop size) without a
+      single confirmed filename pattern relating a fake image to its mask,
+      so a guessed template would silently mismatch rather than fail
+      loudly. Masks in this dataset must be wired up by hand until that
+      convention is confirmed against an actual downloaded copy.
+
+  - dataset: "ITW-SM"
+    real_globs: ["0_real/**"]
+    fake_globs: ["1_fake/**"]
+    generator_from: "none"
+    split_from: "none"
+    mask_template: null
+    exclude_globs: []
+    notes: >-
+      Folder names and the metadata.csv sidecar (path, label, target,
+      platform) verified against the Hugging Face dataset card on
+      2026-09-09. The originating platform (Facebook/Instagram/LinkedIn/X)
+      is only in metadata.csv, not encoded in the folder structure, so it
+      is not modeled here as a generator.
+
+  - dataset: "WildRF"
+    real_globs: ["**/0_real/**"]
+    fake_globs: ["**/1_fake/**"]
+    generator_from: "none"
+    split_from: "regex"
+    split_regex: "^(?P<split>train|val|test)/"
+    mask_template: null
+    exclude_globs: []
+    notes: >-
+      Folder structure (train/val flat, test split further by
+      reddit/twitter/facebook) verified against the repository README on
+      2026-09-09. The test split's platform subfolder is not modeled as a
+      generator; the dataset's own evaluation protocol trains on one
+      platform and tests on the others, which this layout does not encode
+      -- filter the manifest's split/path yourself for that protocol.
+
+  - dataset: "Community Forensics"
+    real_globs: ["real/**"]
+    fake_globs: ["fake/**"]
+    generator_from: "grandparent"
+    split_from: "parent"
+    mask_template: null
+    exclude_globs: []
+    notes: >-
+      This layout describes the OUTPUT of
+      imgforensics.data.layouts.materialize_parquet(), not the raw
+      Parquet shards acquire.yaml downloads (data/*.parquet has no image
+      files to glob at all). materialize_parquet() writes
+      <real|fake>/<generator>/<split>/<name>, matching
+      generator_from="grandparent" / split_from="parent" here.

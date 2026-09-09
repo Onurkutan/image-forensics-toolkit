@@ -41,6 +41,10 @@ dependencies = [
 provenance = [
     "c2pa-python>=0.37",
 ]
+data = [
+    "huggingface_hub>=0.23",
+    "gdown>=5",
+]
 dev = [
     "pytest>=8",
     "pytest-cov",

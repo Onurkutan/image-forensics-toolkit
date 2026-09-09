@@ -31,6 +31,8 @@ not installed, rather than failing.
 | Package | Extra | License | commercial_ok |
 |---|---|---|---|
 | c2pa-python | `provenance` | MIT OR Apache-2.0 | yes |
+| huggingface_hub | `data` | Apache-2.0 | yes |
+| gdown | `data` | MIT | yes |
 
 ## Development dependencies
 

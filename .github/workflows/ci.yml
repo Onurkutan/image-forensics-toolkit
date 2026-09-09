@@ -22,7 +22,7 @@ jobs:
           cache: pip
 
       - name: Install package
-        run: pip install -e ".[dev,provenance]"
+        run: pip install -e ".[dev,provenance,data]"
 
       - name: Lint
         run: ruff check .

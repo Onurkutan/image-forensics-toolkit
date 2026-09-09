@@ -11,6 +11,7 @@ import typer
 from PIL import Image
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -20,12 +21,18 @@ from imgforensics.core import registry
 from imgforensics.core.image import ForensicImage
 from imgforensics.core.types import DetectionResult
 from imgforensics.data import (
+    LicenseNotAcceptedError,
     Manifest,
     audit_manifest,
     build_manifest,
+    fetch,
     get_dataset,
+    get_recipe,
     label_from_parent_folder,
     load_registry,
+    merge,
+    prepare,
+    sample,
 )
 from imgforensics.eval.robustness import RobustnessSuite
 from imgforensics.eval.runner import BenchmarkConfig, run_benchmark
@@ -178,7 +185,7 @@ def analyze(
         for key, value in result.details.items():
             if value is None:
                 continue
-            details_table.add_row(key, _truncate(str(_jsonable(value))))
+            details_table.add_row(key, escape(_truncate(str(_jsonable(value)))))
         heatmap_path = heatmap_paths[result.detector]
         if heatmap_path is not None:
             details_table.add_row("heatmap", str(heatmap_path))
@@ -345,8 +352,111 @@ def datasets_show(
     table.add_column("field", style="bold")
     table.add_column("value")
     for field_name, value in info.model_dump().items():
-        table.add_row(field_name, "-" if value is None else str(value))
+        table.add_row(field_name, "-" if value is None else escape(str(value)))
     _registry_console.print(table)
+
+
+@datasets_app.command("recipe")
+def datasets_recipe(
+    name: Annotated[str, typer.Argument(help="Exact dataset name, as printed by 'datasets list'.")],
+) -> None:
+    """Print the acquisition recipe (download steps) for one registered dataset."""
+    try:
+        recipe = get_recipe(name)
+    except KeyError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    console.print(f"[bold]Recipe: {recipe.dataset}[/bold]")
+    if recipe.subset_note:
+        console.print(recipe.subset_note)
+    console.print("")
+    console.print("[bold]steps:[/bold]")
+    for step in recipe.steps:
+        console.print(step.model_dump_json(indent=2, exclude_none=True))
+    if recipe.variants:
+        for variant_name, steps in recipe.variants.items():
+            console.print(f"[bold]variant '{variant_name}':[/bold]")
+            for step in steps:
+                console.print(step.model_dump_json(indent=2, exclude_none=True))
+
+
+@datasets_app.command("fetch")
+def datasets_fetch(
+    name: Annotated[str, typer.Argument(help="Exact dataset name, as printed by 'datasets list'.")],
+    dest: Annotated[Path, typer.Option("--dest", help="Destination directory.")],
+    variant: Annotated[
+        str | None, typer.Option("--variant", help="Named alternative step list from the recipe.")
+    ] = None,
+    accept_license: Annotated[
+        bool,
+        typer.Option(
+            "--accept-license", help="Accept the printed license and proceed with the download."
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run", help="Print the license and download plan only; download nothing."
+        ),
+    ] = False,
+) -> None:
+    """Download a registered dataset per its acquisition recipe, after a license gate."""
+    try:
+        report = fetch(
+            name,
+            dest,
+            variant=variant,
+            accept_license=accept_license,
+            dry_run=dry_run,
+            progress=True,
+        )
+    except LicenseNotAcceptedError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    except KeyError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    table = Table(title=f"Fetch report: {name}")
+    table.add_column("step")
+    table.add_column("status")
+    table.add_column("bytes", justify="right")
+    for step in report.steps:
+        table.add_row(escape(step.description), step.status, str(step.bytes_downloaded))
+    console.print(table)
+
+
+@datasets_app.command("prepare")
+def datasets_prepare(
+    name: Annotated[
+        str,
+        typer.Argument(
+            help="Dataset name; used for the manifest source and, if registered, layout."
+        ),
+    ],
+    src: Annotated[
+        Path,
+        typer.Option(
+            "--src", exists=True, file_okay=False, readable=True, help="Downloaded dataset root."
+        ),
+    ],
+    out: Annotated[Path, typer.Option("--out", help="Path to write the manifest (.jsonl) to.")],
+    strict_audit: Annotated[
+        bool,
+        typer.Option("--strict-audit", help="Exit with code 1 if the bias audit finds problems."),
+    ] = False,
+) -> None:
+    """Build a manifest for a registered (or ad-hoc) dataset using its layout, and audit it."""
+    manifest, skipped, report = prepare(name, src, out)
+    console.print(f"Wrote {len(manifest.entries)} entries to {out}")
+    if skipped:
+        console.print(f"[yellow]{len(skipped)} file(s) skipped (unreadable):[/yellow]")
+        for line in skipped[:20]:
+            console.print(f"  {line}")
+        if len(skipped) > 20:
+            console.print(f"  ... and {len(skipped) - 20} more")
+    console.print(Markdown(report.to_markdown()))
+    if strict_audit and not report.ok:
+        raise typer.Exit(code=1)
 
 
 @manifest_app.command("build")
@@ -388,6 +498,47 @@ def manifest_build(
             console.print(f"  {line}")
         if len(skipped) > 20:
             console.print(f"  ... and {len(skipped) - 20} more")
+
+
+@manifest_app.command("sample")
+def manifest_sample(
+    in_path: Annotated[
+        Path,
+        typer.Argument(exists=True, dir_okay=False, readable=True, help="Input manifest .jsonl."),
+    ],
+    n: Annotated[int, typer.Option("--n", help="Target sample size.")],
+    out: Annotated[Path, typer.Option("--out", help="Path to write the sampled manifest to.")],
+    seed: Annotated[int, typer.Option("--seed", help="Seed for the deterministic sample.")] = 0,
+    stratify: Annotated[
+        str,
+        typer.Option(
+            "--stratify", help="Comma-separated ManifestEntry field names to stratify by."
+        ),
+    ] = "label,generator",
+) -> None:
+    """Draw a deterministic, proportional stratified sample of N entries from a manifest."""
+    manifest = Manifest.load(in_path)
+    fields = tuple(field.strip() for field in stratify.split(",") if field.strip())
+    sampled = sample(manifest, n, seed=seed, stratify_by=fields)
+    sampled.save(out)
+    console.print(f"Wrote {len(sampled.entries)} of {len(manifest.entries)} entries to {out}")
+
+
+@manifest_app.command("merge")
+def manifest_merge(
+    inputs: Annotated[
+        list[Path],
+        typer.Argument(
+            exists=True, dir_okay=False, readable=True, help="Manifest .jsonl files to merge."
+        ),
+    ],
+    out: Annotated[Path, typer.Option("--out", help="Path to write the merged manifest to.")],
+) -> None:
+    """Concatenate several manifests into one (see imgforensics.data.manifest.merge)."""
+    manifests = [Manifest.load(path) for path in inputs]
+    merged = merge(manifests)
+    merged.save(out)
+    console.print(f"Wrote {len(merged.entries)} entries (from {len(manifests)} manifests) to {out}")
 
 
 if __name__ == "__main__":

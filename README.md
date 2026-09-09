@@ -84,7 +84,22 @@ subfolders via `imgforensics manifest build ROOT --dataset NAME --out
 manifest.jsonl`, browse the external dataset registry with `imgforensics
 datasets list` / `datasets show NAME`, and check a manifest's real/fake
 halves for format, resolution, JPEG-quality, and duplicate-image bias with
-`imgforensics audit manifest.jsonl [--strict]`. See
+`imgforensics audit manifest.jsonl [--strict]`. `imgforensics datasets
+fetch NAME --dest DIR --accept-license` downloads a registered dataset per
+its packaged recipe (`imgforensics datasets recipe NAME` prints it first;
+`--dry-run` prints the license and plan without downloading) -- it always
+prints the license and refuses to proceed without `--accept-license`, and
+never asks for or stores Kaggle/Hugging Face credentials: a dataset that
+needs one prints instructions and stops instead. `imgforensics datasets
+prepare NAME --src DIR --out manifest.jsonl` turns a downloaded folder into
+a manifest using a per-dataset layout description, falling back to
+`label_from_parent_folder` when none is registered. A Hugging Face (`hf`)
+step can bound its download to a `max_files` sample of the repository
+instead of pulling it whole -- Community Forensics defaults to the first 8
+sorted Parquet shards of the ~260 GB `-Small` repository (`--variant full`
+for everything). `imgforensics manifest
+sample IN --n N --out OUT` draws a deterministic, stratified subsample, and
+`imgforensics manifest merge A B ... --out OUT` combines manifests. See
 [`imgforensics.eval.metrics`](src/imgforensics/eval/metrics.py) for the
 image-level (AUC, AP, accuracy, ECE, ...) and pixel-level (F1, best-F1, AP,
 IoU) metrics used to score detectors and localizers.

@@ -12,7 +12,9 @@ level so a downstream training config can filter on it (see
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Iterable
+import math
+import random
+from collections.abc import Callable, Iterable, Sequence
 from datetime import date
 from pathlib import Path
 from typing import Any, Literal
@@ -268,3 +270,170 @@ def build_manifest(
         created=date.today().isoformat(),
     )
     return Manifest(meta=meta, entries=entries), skipped
+
+
+def _stratum_value(entry: ManifestEntry, field_name: str) -> str:
+    value = getattr(entry, field_name)
+    return "none" if value is None else str(value)
+
+
+def _stratum_seed(seed: int, key: tuple[str, ...]) -> int:
+    """A 64-bit integer seed derived from ``seed`` and a stratum key.
+
+    ``random.Random`` only guarantees reproducible seeding for
+    ``None``/``int``/``float``/``str``/``bytes``/``bytearray`` -- seeding it
+    with a tuple falls back to Python's (hash-randomized, so
+    process-dependent) ``hash()``, which would silently break
+    :func:`sample`'s determinism guarantee across runs. Hashing an explicit
+    string encoding instead keeps the seed stable everywhere.
+    """
+    basis = f"{seed}:{'/'.join(key)}".encode()
+    digest = hashlib.sha256(basis).digest()
+    return int.from_bytes(digest[:8], byteorder="big")
+
+
+def sample(
+    manifest: Manifest,
+    n: int,
+    *,
+    seed: int = 0,
+    stratify_by: Sequence[str] = ("label", "generator"),
+) -> Manifest:
+    """Deterministically draw a proportional stratified sample of ``n`` entries.
+
+    Entries are grouped by the tuple of ``getattr(entry, field)`` for each
+    field in ``stratify_by`` (missing/``None`` values group under
+    ``"none"``, matching :meth:`Manifest.summary`). ``n`` is allocated
+    across strata proportionally to each stratum's share of the manifest,
+    using the largest-remainder method so the allocation sums to exactly
+    ``min(n, len(manifest.entries))`` -- never more entries than exist, and
+    never more than a stratum actually has. Selection within a stratum is
+    seeded from ``(seed, stratum key)`` via :class:`random.Random`, so the
+    same manifest, ``n``, ``seed`` and ``stratify_by`` always produce the
+    same sample.
+
+    The returned manifest's ``meta`` is a copy of ``manifest.meta`` with a
+    note appended: ``"sampled <k> of <N> with seed <seed>"``.
+
+    Args:
+        manifest: Source manifest.
+        n: Target sample size (clamped to ``len(manifest.entries)``).
+        seed: Seed for the deterministic per-stratum shuffle.
+        stratify_by: :class:`ManifestEntry` field names to stratify by.
+
+    Returns:
+        A new :class:`Manifest` with the sampled entries.
+    """
+    entries = manifest.entries
+    total = len(entries)
+    target_total = max(0, min(n, total))
+
+    groups: dict[tuple[str, ...], list[ManifestEntry]] = {}
+    for entry in entries:
+        key = tuple(_stratum_value(entry, field_name) for field_name in stratify_by)
+        groups.setdefault(key, []).append(entry)
+
+    keys = sorted(groups.keys())
+    counts = {key: len(groups[key]) for key in keys}
+    raw_shares = {key: (target_total * counts[key] / total) if total else 0.0 for key in keys}
+    allocation = {key: min(counts[key], int(math.floor(raw_shares[key]))) for key in keys}
+    remainder = target_total - sum(allocation.values())
+
+    # Largest-remainder method: give the leftover seats to the strata with the
+    # biggest fractional share first (ties broken by sorted key, for determinism).
+    by_remainder = sorted(
+        keys, key=lambda key: (-(raw_shares[key] - math.floor(raw_shares[key])), key)
+    )
+    index = 0
+    while remainder > 0 and by_remainder:
+        key = by_remainder[index % len(by_remainder)]
+        if allocation[key] < counts[key]:
+            allocation[key] += 1
+            remainder -= 1
+        index += 1
+
+    selected: list[ManifestEntry] = []
+    for key in keys:
+        take = allocation[key]
+        if take <= 0:
+            continue
+        stratum_entries = sorted(groups[key], key=lambda entry: entry.path)
+        indices = list(range(len(stratum_entries)))
+        random.Random(_stratum_seed(seed, key)).shuffle(indices)
+        selected.extend(stratum_entries[i] for i in indices[:take])
+
+    note = f"sampled {len(selected)} of {total} with seed {seed}"
+    combined_notes = f"{manifest.meta.notes}; {note}" if manifest.meta.notes else note
+    new_meta = manifest.meta.model_copy(update={"notes": combined_notes})
+    return Manifest(meta=new_meta, entries=selected)
+
+
+def merge(manifests: Sequence[Manifest]) -> Manifest:
+    """Concatenate several manifests' entries into one.
+
+    When every input manifest shares the same ``meta.root``, entry paths
+    (already root-relative) are kept as-is and the merged manifest keeps
+    that root. When roots differ, every entry's path (and ``mask_path``,
+    when set) is rewritten to an absolute POSIX path -- ``<that
+    manifest's root> / <entry path>`` -- so the merged manifest is still
+    unambiguous, and a note recording this is appended to ``meta.notes``.
+
+    ``meta.dataset`` becomes the sorted, ``"+"``-joined set of source
+    dataset names. ``meta.license`` is kept only when every input agrees;
+    otherwise ``None`` with a note. ``meta.commercial_ok`` is ``True`` only
+    when every input is ``True``, ``False`` when any input is ``False``
+    (the conservative choice for a downstream commercial-use filter), and
+    ``None`` otherwise (e.g. all unknown, or a mix of ``True``/``None``
+    with no ``False``).
+
+    Raises:
+        ValueError: ``manifests`` is empty.
+    """
+    if not manifests:
+        raise ValueError("merge() requires at least one manifest")
+
+    roots = {m.meta.root for m in manifests}
+    common_root = next(iter(roots)) if len(roots) == 1 else None
+
+    notes: list[str] = []
+    entries: list[ManifestEntry] = []
+    if common_root is not None:
+        for m in manifests:
+            entries.extend(m.entries)
+    else:
+        notes.append("merged manifests had different roots; paths stored as absolute")
+        for m in manifests:
+            root_path = Path(m.meta.root)
+            for entry in m.entries:
+                abs_path = (root_path / entry.path).as_posix()
+                abs_mask = (root_path / entry.mask_path).as_posix() if entry.mask_path else None
+                entries.append(entry.model_copy(update={"path": abs_path, "mask_path": abs_mask}))
+
+    dataset_names = sorted({m.meta.dataset for m in manifests})
+    licenses = {m.meta.license for m in manifests}
+    if len(licenses) == 1:
+        license_ = licenses.pop()
+    else:
+        license_ = None
+        notes.append("source manifests disagreed on license; left unset")
+
+    if all(m.meta.commercial_ok is True for m in manifests):
+        commercial_ok: bool | None = True
+    elif any(m.meta.commercial_ok is False for m in manifests):
+        commercial_ok = False
+    else:
+        commercial_ok = None
+
+    for m in manifests:
+        if m.meta.notes:
+            notes.append(f"[{m.meta.dataset}] {m.meta.notes}")
+
+    meta = ManifestMeta(
+        dataset="+".join(dataset_names),
+        root=common_root or "",
+        license=license_,
+        commercial_ok=commercial_ok,
+        created=date.today().isoformat(),
+        notes="; ".join(notes) or None,
+    )
+    return Manifest(meta=meta, entries=entries)

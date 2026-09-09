@@ -1,0 +1,195 @@
+# Dataset acquisition recipes (see imgforensics.data.acquire).
+#
+# Each entry's `dataset` must name an entry in `datasets.yaml`. A step's
+# `url`/`repo_id`/`file_id` must either already appear in that registry
+# entry's `homepage`/`download` fields, or have been independently verified
+# (see each entry's note below for how). When neither was possible -- an
+# unstable, per-visit signed URL, or a gated/form-only dataset -- the
+# recipe uses a `manual` step instead of guessing a URL.
+#
+# `fetch()` never handles credentials: nothing here asks for a Kaggle
+# token, a Hugging Face access token, or a login. A dataset that needs one
+# only ever appears here as a `manual` step with printed instructions.
+
+recipes:
+  - dataset: "Community Forensics"
+    subset_note: >-
+      The registry's homepage links the main ~1 TB "Community Forensics"
+      dataset (OwensLab/CommunityForensics); its own dataset card documents
+      a separate, smaller repository -- OwensLab/CommunityForensics-Small,
+      ~260 GB, 512x512 PNGs stored as Parquet shards under `data/*.parquet`,
+      single "train" split with per-row `split`/`label`/`model_name`
+      columns -- for disk-constrained setups. This recipe downloads that
+      "-Small" repository (verified via its Hugging Face dataset-server
+      schema on 2026-09-09: columns image_name, format, resolution, mode,
+      image_data, model_name, nsfw_flag, prompt, real_source, subset,
+      split, label, architecture). The default step bounds the download to
+      the first 8 sorted `data/*.parquet` shards -- roughly a few GB of
+      512x512 PNG rows, not the whole ~260 GB repository, which does not
+      fit this project's disk budget (see docs/ROADMAP.md); pass
+      `--variant full` to download every shard instead. Materializing the
+      Parquet rows into a real/fake image tree needs
+      `imgforensics.data.layouts.materialize_parquet` (requires `pyarrow`,
+      not an imgforensics dependency -- see its docstring for manual
+      instructions when pyarrow is unavailable).
+    steps:
+      - method: hf
+        repo_id: "OwensLab/CommunityForensics-Small"
+        repo_type: "dataset"
+        allow_patterns: ["data/*.parquet"]
+        revision: "main"
+        max_files: 8
+    variants:
+      full:
+        - method: hf
+          repo_id: "OwensLab/CommunityForensics-Small"
+          repo_type: "dataset"
+          allow_patterns: ["data/*.parquet"]
+          revision: "main"
+
+  - dataset: "Synthbuster"
+    subset_note: >-
+      Single archive covering all 9 generators' fake images only; the
+      paired RAISE-1k real photos are a separate download (registry entry
+      "RAISE") under RAISE's own non-commercial terms and are not part of
+      this zip.
+    steps:
+      - method: http
+        url: "https://zenodo.org/records/10066460/files/synthbuster.zip?download=1"
+        filename: "synthbuster.zip"
+        sha256: null
+        unpack: true
+
+  - dataset: "COCO"
+    subset_note: >-
+      Default step downloads only val2017.zip (~1 GB, matching the
+      "val_only" variant). Use --variant train for the full training set
+      (~18 GB) or --variant annotations for the instance/caption JSONs.
+    steps:
+      - method: http
+        url: "http://images.cocodataset.org/zips/val2017.zip"
+        filename: "val2017.zip"
+        sha256: null
+        unpack: true
+    variants:
+      val_only:
+        - method: http
+          url: "http://images.cocodataset.org/zips/val2017.zip"
+          filename: "val2017.zip"
+          sha256: null
+          unpack: true
+      train:
+        - method: http
+          url: "http://images.cocodataset.org/zips/train2017.zip"
+          filename: "train2017.zip"
+          sha256: null
+          unpack: true
+      annotations:
+        - method: http
+          url: "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
+          filename: "annotations_trainval2017.zip"
+          sha256: null
+          unpack: true
+
+  - dataset: "CocoGlide"
+    subset_note: >-
+      Downloaded from the TruFor authors' own host (grip.unina.it), which
+      serves the raw images and masks as a flat zip -- not the Hugging
+      Face "nebula/CocoGlide" mirror, which is Parquet-only (image/mask
+      columns auto-converted for the `datasets` library, not gettable as
+      individual files via huggingface_hub's allow_patterns). Verified via
+      the TruFor repository README on 2026-09-09. The zip's internal
+      folder layout is not documented publicly, so no layouts.yaml entry
+      is provided for it yet -- inspect the extracted archive and add one
+      once the layout is confirmed.
+    steps:
+      - method: http
+        url: "https://www.grip.unina.it/download/prog/TruFor/CocoGlide.zip"
+        filename: "CocoGlide.zip"
+        sha256: null
+        unpack: true
+
+  - dataset: "CASIA v2.0"
+    subset_note: >-
+      A single Google Drive archive already bundles the corrected images
+      (Au/ authentic, Tp/ tampered) together with the corrected
+      ground-truth masks (Gt/), per the SunnyHaze/CASIA2.0-Corrected-Groundtruth
+      mirror README (verified 2026-09-09; this is the same file id as the
+      registry's `download` field). There is no separate GitHub-hosted zip
+      to fetch over plain http, and no separate manual step is needed for
+      the images -- both live in this one archive, unlike a typical
+      images-plus-corrected-masks split.
+    steps:
+      - method: gdrive
+        file_id: "1JN93ts7VxJ4bbJL9TlE9uxM3ZeYuCN9M"
+        filename: "casia2_corrected.zip"
+        unpack: true
+
+  - dataset: "TGIF"
+    subset_note: >-
+      Hosted on a custom download service (cloud.ilabt.imec.be) behind
+      per-visit, expiring access tokens rather than a stable URL (verified
+      against the project README on 2026-09-09) -- there is nothing
+      scriptable to fetch, so this is a manual step.
+    steps:
+      - method: manual
+        instructions: |
+          TGIF has no stable download URL: cloud.ilabt.imec.be issues a
+          fresh, signed link each time the download page is visited.
+
+          1. Open https://github.com/IDLabMedia/tgif-dataset and follow
+             the "Download all TGIF images" link (add the TGIF2 FLUX/random
+             links too if you want the 2026 extension).
+          2. Extract so this dataset's root contains the top-level folders
+             documented in that README: masks/, original/, SD2-sp/,
+             PS-sp/, SD2-fr/, SDXL-fr/ (plus the TGIF2 flux1*/masks-*
+             folders if downloaded), each split into training/validation/testing.
+          3. License is CC BY-SA 4.0 (ShareAlike): any redistributed
+             derivative built from these images must carry the same license.
+
+  - dataset: "ITW-SM"
+    steps:
+      - method: hf
+        repo_id: "dkarageo/itw-sm"
+        repo_type: "dataset"
+        allow_patterns: []
+        revision: null
+
+  - dataset: "WildRF"
+    subset_note: >-
+      Google Drive file id taken directly from the registry's `download`
+      field (same URL, verified 2026-09-09).
+    steps:
+      - method: gdrive
+        file_id: "1A0xoL44Yg68ixd-FuIJn2VC4vdZ6M2gn"
+        filename: "wildrf.zip"
+        unpack: true
+
+  - dataset: "Chameleon"
+    steps:
+      - method: manual
+        instructions: |
+          Chameleon is gated behind an academic email request; there is no
+          public download URL.
+
+          1. Read https://github.com/shilinyan99/AIDE (Chameleon's parent
+             repository) for the current contact address and request
+             instructions.
+          2. Email the authors requesting access, citing the paper
+             (arXiv:2406.19435).
+          3. License: "only used for academic research; commercial use in
+             any form is prohibited" -- do not use for anything commercial.
+
+  - dataset: "MIML"
+    steps:
+      - method: manual
+        instructions: |
+          MIML is licensed to full-time university/research-institute
+          staff via a signed institutional application form; there is no
+          public download URL.
+
+          1. Read https://github.com/qcf-568/MIML for the current
+             application form and contact details.
+          2. Have your institution sign and submit the form as instructed
+             there.
+          3. License: non-commercial research use only.
