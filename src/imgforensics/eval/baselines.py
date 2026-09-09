@@ -16,7 +16,7 @@ import hashlib
 
 import numpy as np
 
-import imgforensics.signals  # noqa: F401  (side effect: registers every signal detector)
+import imgforensics.signals  # also a side effect: registers every signal detector
 from imgforensics.core import registry
 from imgforensics.core.base import BaseDetector
 from imgforensics.core.image import ForensicImage
@@ -78,20 +78,25 @@ class RandomDetector(BaseDetector):
 
 
 class SignalsMeanDetector(BaseDetector):
-    """Runs every registered signal detector and returns the mean of their scores.
+    """Runs every classical signal detector and returns the mean of their scores.
 
     ``details["per_signal"]`` carries the individual score each signal
     produced, so a mean-score outlier can be traced back to its source.
     Uses :meth:`BaseDetector.predict` (not :meth:`~BaseDetector.run`) on each
     signal, so this detector's own ``elapsed_ms`` (filled in by ``.run()`` at
     the call site) reflects the whole ensemble.
+
+    Iterates :data:`imgforensics.signals.SIGNAL_NAMES` rather than the whole
+    registry: this is the *signals* floor a learned detector is measured
+    against, so it must not quietly absorb the learned detector itself once
+    the ``ml`` extra registers one.
     """
 
     name = "signals_mean"
 
     def predict(self, image: ForensicImage) -> DetectionResult:
         per_signal: dict[str, float] = {}
-        for signal_name in registry.available():
+        for signal_name in imgforensics.signals.SIGNAL_NAMES:
             detector_cls = registry.get(signal_name)
             instance = detector_cls()
             instance.load()

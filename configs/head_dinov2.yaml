@@ -1,0 +1,60 @@
+# Training config for the DINOv2 multi-layer head
+# (imgforensics.detectors.train.TrainConfig).
+#
+#   imgforensics train head --config configs/head_dinov2.yaml
+#
+# The manifest paths below are placeholders: build your own first, e.g.
+#
+#   imgforensics datasets prepare "Community Forensics" --src data/raw/cf --out data/manifests/cf.jsonl
+#   imgforensics manifest sample data/manifests/cf.jsonl --n 20000 --out data/manifests/train.jsonl
+#
+# and keep the validation manifest disjoint from the training one -- and, for a
+# number worth reporting, built from generators the training split never saw
+# (docs/research/01_ai_generated_image_detection.md, section 7d).
+#
+# Features are read from --cache-dir and anything missing is extracted on the
+# spot, so a separate `features extract` run is an optimization, not a
+# prerequisite. To pre-extract with the same settings as this config:
+#
+#   imgforensics features extract data/manifests/train.jsonl \
+#       --cache-dir data/features --views 2 --augment configs/augment_default.yaml
+
+train_manifest: data/manifests/train.jsonl
+val_manifest: data/manifests/val.jsonl
+cache_dir: data/features
+
+backbone: dinov2_vitb14
+
+# Crop, never resize. Four native-resolution 224 px tiles nearest the center.
+crop:
+  size: 224
+  mode: grid
+  max_crops: 4
+  seed: 0
+
+# View 0 is the image as it is; view 1 is an augmented copy. Raise `views` for
+# more augmented variety per image, at a proportional cost in backbone time
+# and cache size.
+augment: configs/augment_default.yaml
+views: 2
+
+# n_layers and dim are read off the cached features, not configured here.
+head:
+  proj_dim: 256
+  hidden_dim: 256
+  dropout: 0.2
+  layer_weighting: softmax
+
+epochs: 20
+batch_size: 256
+lr: 0.001
+weight_decay: 0.01
+label_smoothing: 0.05
+balance_classes: true
+early_stopping_patience: 5
+seed: 0
+
+# Gitignored, like everything else under weights/. The detector picks a
+# checkpoint up from here by default; IMGFORENSICS_HEAD_DIR overrides it.
+out_dir: weights/dinov2_head
+device: auto

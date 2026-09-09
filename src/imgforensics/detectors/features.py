@@ -4,10 +4,21 @@ A frozen backbone is run once per image and never again: the head that will
 sit on top of these features (``docs/ROADMAP.md``, section 5, Phase 3) trains
 in minutes, so the backbone forward pass -- not the training -- dominates the
 cost of a sweep. :class:`FeatureCache` therefore keys features on everything
-that could change them (the image's own sha256, the backbone name, and a hash
-of the crop policy) and stores one small ``.npz`` per image, so re-running an
-experiment with a different head, or after adding images to a manifest, reads
-from disk instead of touching the GPU.
+that could change them (the image's own sha256, the backbone name, a hash of
+the crop policy, and the augmentation and view below) and stores one small
+``.npz`` per entry, so re-running an experiment with a different head, or
+after adding images to a manifest, reads from disk instead of touching the
+GPU.
+
+An image can also be cached under several *views*: view 0 is the image as it
+is, views 1..K-1 are the same image put through
+:func:`imgforensics.eval.preprocess.augment` first, with a per-view seed
+derived from the image's own bytes. Training a head on the augmented views
+(``docs/ROADMAP.md``, section 3, "crop, never resize; augment always") is what
+keeps it from learning the JPEG history of its training set, and caching them
+means that augmentation is paid for once rather than once per epoch. The
+augmentation config and the view index are part of the cache key, so two runs
+with different augmentation policies never read each other's features.
 
 Features are stored as float16 (half the disk, and well inside the precision
 of activations that were computed under float16 autocast on CUDA anyway) and
@@ -22,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -40,6 +52,7 @@ from imgforensics.detectors.backbones import (
     resolve_device,
 )
 from imgforensics.detectors.crops import CropPolicy, crops_for, to_array
+from imgforensics.eval.preprocess import AugmentationConfig, augment
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing only, never at runtime
     import torch
@@ -48,6 +61,12 @@ _DEFAULT_BATCH_SIZE = 32
 _SHARD_PREFIX_LENGTH = 2
 _FILENAME_PARTS = 3
 _PROGRESS_EVERY = 50
+
+#: ``augment_hash`` of a key with no augmentation config attached.
+NO_AUGMENT_HASH = "none"
+
+# Trailing "v<n>" marking the extended file-name form (see CacheKey.filename).
+_VIEW_SUFFIX = re.compile(r"v\d+")
 
 
 @dataclass(frozen=True)
@@ -63,17 +82,28 @@ class CacheKey:
     backbone: str
     policy: CropPolicy
     policy_hash: str
+    augment_hash: str = NO_AUGMENT_HASH
+    view: int = 0
 
     @property
     def filename(self) -> str:
-        """``<sha256>_<backbone>_<policy hash>.npz`` -- the three key parts, in order.
+        """The cache file name for this key.
 
-        Neither the sha256 nor the policy hash contains an underscore, so a
-        backbone name that does (``dinov2_vitb14``) is still recoverable by
-        splitting on the first and last separator (see
+        ``<sha256>_<backbone>_<policy hash>.npz`` for the plain case (view 0,
+        no augmentation), and
+        ``<sha256>_<backbone>_<policy hash>_<augment hash>_v<view>.npz``
+        otherwise. Keeping the short form means a cache filled before
+        augmented views existed still answers every plain lookup.
+
+        None of the hashes contains an underscore and the view suffix always
+        starts with ``v``, so a backbone name that does contain one
+        (``dinov2_vitb14``) is still recoverable from either form (see
         :meth:`FeatureCache.stats`).
         """
-        return f"{self.image_sha256}_{self.backbone}_{self.policy_hash}.npz"
+        stem = f"{self.image_sha256}_{self.backbone}_{self.policy_hash}"
+        if self.view == 0 and self.augment_hash == NO_AUGMENT_HASH:
+            return f"{stem}.npz"
+        return f"{stem}_{self.augment_hash}_v{self.view}.npz"
 
     @property
     def shard(self) -> str:
@@ -90,20 +120,36 @@ class FeatureCache:
 
     Each file holds ``features`` (float16, ``(n_crops, n_layers, D)``),
     ``layers`` (the block indices behind the middle axis), ``crop_policy``
-    (the policy as a JSON string), ``backbone`` (its registry name) and
-    ``created`` (an ISO-8601 UTC timestamp).
+    (the policy as a JSON string), ``backbone`` (its registry name),
+    ``augment_hash`` and ``view`` (which augmentation policy and which view
+    produced it), and ``created`` (an ISO-8601 UTC timestamp).
     """
 
     def __init__(self, directory: str | Path) -> None:
         self.dir = Path(directory)
 
-    def key_for(self, image_sha256: str, backbone: str, policy: CropPolicy) -> CacheKey:
-        """Build the cache key for one (image, backbone, crop policy) combination."""
+    def key_for(
+        self,
+        image_sha256: str,
+        backbone: str,
+        policy: CropPolicy,
+        *,
+        augment: AugmentationConfig | None = None,
+        view: int = 0,
+    ) -> CacheKey:
+        """Build the cache key for one (image, backbone, crop policy, augmentation, view).
+
+        ``augment`` and ``view`` both enter the key, so features extracted
+        under two augmentation policies -- or for two views of the same image
+        -- never collide.
+        """
         return CacheKey(
             image_sha256=image_sha256,
             backbone=backbone,
             policy=policy,
             policy_hash=policy.fingerprint(),
+            augment_hash=NO_AUGMENT_HASH if augment is None else augment.fingerprint(),
+            view=view,
         )
 
     def path_for(self, key: CacheKey) -> Path:
@@ -136,6 +182,8 @@ class FeatureCache:
             layers=np.asarray(list(layers) if layers is not None else [], dtype=np.int32),
             crop_policy=np.asarray(key.policy.model_dump_json()),
             backbone=np.asarray(key.backbone),
+            augment_hash=np.asarray(key.augment_hash),
+            view=np.asarray(key.view, dtype=np.int32),
             created=np.asarray(datetime.now(timezone.utc).isoformat(timespec="seconds")),
         )
         return path
@@ -153,13 +201,17 @@ class FeatureCache:
     def stats(self) -> dict[str, int]:
         """Count cached files per backbone name, read from the file names.
 
-        Names that do not follow :attr:`CacheKey.filename` are counted under
-        ``"unknown"`` rather than skipped, so a stray file in the cache
-        directory is visible instead of silently ignored.
+        Understands both file-name forms (see :attr:`CacheKey.filename`): a
+        trailing ``_<augment hash>_v<view>`` is stripped before the backbone
+        name is read out of the middle. Names that follow neither form are
+        counted under ``"unknown"`` rather than skipped, so a stray file in
+        the cache directory is visible instead of silently ignored.
         """
         counts: dict[str, int] = {}
         for path in self.entries():
             parts = path.stem.split("_")
+            if len(parts) > _FILENAME_PARTS and _VIEW_SUFFIX.fullmatch(parts[-1]):
+                parts = parts[:-2]
             name = "_".join(parts[1:-1]) if len(parts) >= _FILENAME_PARTS else "unknown"
             counts[name or "unknown"] = counts.get(name or "unknown", 0) + 1
         return counts
@@ -184,12 +236,27 @@ class FeatureCache:
 
 @dataclass
 class _Pending:
-    """One image queued for a batched forward pass (or already answered by the cache)."""
+    """One (image, view) queued for a batched forward pass, or already answered by the cache."""
 
     path: Path
+    view: int
     key: CacheKey | None
     features: np.ndarray | None = None
     crops: list[Image.Image] = field(default_factory=list)
+
+
+def _view_seed(image_bytes: bytes, view: int, policy: CropPolicy) -> int:
+    """Derive the 64-bit augmentation seed of one view from the image's own bytes.
+
+    Mirrors :func:`imgforensics.detectors.crops._seed_for`: hash the image
+    material together with a discriminator (here the view index and the crop
+    policy's seed) and take the leading 8 bytes. The same image therefore
+    always gets the same augmentation for a given view, two views of one
+    image get different ones, and bumping ``policy.seed`` reshuffles every
+    view of every image at once.
+    """
+    material = image_bytes + f"view{view}".encode() + str(policy.seed).encode("utf-8")
+    return int.from_bytes(hashlib.sha256(material).digest()[:8], byteorder="big")
 
 
 class FeatureExtractor:
@@ -206,6 +273,8 @@ class FeatureExtractor:
         device: str = "auto",
         crop_policy: CropPolicy | None = None,
         batch_size: int = _DEFAULT_BATCH_SIZE,
+        augment: AugmentationConfig | None = None,
+        views: int = 1,
     ) -> None:
         """Build an extractor (nothing is loaded or downloaded yet).
 
@@ -219,6 +288,11 @@ class FeatureExtractor:
                 backbone's own ``input_size`` as the crop size.
             batch_size: Maximum number of *crops* (not images) per forward
                 pass.
+            augment: Training-time augmentation applied to the whole image
+                before cropping, for every view above 0. ``None`` (the
+                default) leaves every view un-augmented.
+            views: How many views per image to produce. View 0 is always the
+                un-augmented image; views 1..K-1 are augmented copies.
 
         Raises:
             KeyError: ``backbone`` is not a registered backbone name.
@@ -227,9 +301,12 @@ class FeatureExtractor:
         self.device = device
         self.crop_policy = crop_policy or CropPolicy(size=self.spec.input_size)
         self.batch_size = max(1, int(batch_size))
+        self.augment = augment
+        self.views = max(1, int(views))
         self._model: torch.nn.Module | None = None
         self._normalization: tuple[tuple[float, ...], tuple[float, ...]] | None = None
-        #: Cache hits during the most recent :meth:`features_for_paths` call.
+        #: Cache hits during the most recent :meth:`features_for_paths` call,
+        #: counted per (image, view) pair rather than per image.
         self.cache_hits = 0
 
     @property
@@ -263,7 +340,22 @@ class FeatureExtractor:
             outputs.append(extract(self.model, self.spec, batch).cpu().numpy())
         return np.concatenate(outputs, axis=0)
 
-    def features_for_image(self, image: ForensicImage) -> np.ndarray:
+    def _crops_for_view(self, image: ForensicImage, view: int) -> list[Image.Image]:
+        """The crops of one view: view 0 as-is, any other view augmented first.
+
+        The augmentation is seeded from the image's bytes and the view index
+        (:func:`_view_seed`), so a view is reproducible from the image alone
+        -- re-running an extraction, or filling in a view a previous run was
+        interrupted before writing, reproduces the same pixels.
+        """
+        material = image.raw if image.raw is not None else np.asarray(image.rgb).tobytes()
+        source = image.rgb
+        if view > 0 and self.augment is not None:
+            rng = np.random.default_rng(_view_seed(material, view, self.crop_policy))
+            source = augment(source, self.augment, rng)
+        return crops_for(source, self.crop_policy, seed_material=material)
+
+    def features_for_image(self, image: ForensicImage, view: int = 0) -> np.ndarray:
         """Features for one image: ``(n_crops, n_layers, D)`` float32.
 
         ``n_crops`` is what the crop policy produced for this image (so it
@@ -271,23 +363,26 @@ class FeatureExtractor:
         ``n_layers`` is ``len(spec.layers) + 1`` -- the selected blocks' CLS
         tokens followed by the pooled output (see
         :func:`imgforensics.detectors.backbones.extract`).
+
+        ``view`` above 0 augments the image first (see :meth:`_crops_for_view`).
         """
-        crops = crops_for(image.rgb, self.crop_policy, seed_material=image.raw)
-        return self._forward(crops)
+        return self._forward(self._crops_for_view(image, view))
 
     def features_for_paths(
         self,
         paths: Iterable[str | Path],
         cache: FeatureCache | None = None,
         progress: bool = True,
-    ) -> Iterator[tuple[Path, np.ndarray]]:
-        """Yield ``(path, features)`` for every path, in input order.
+    ) -> Iterator[tuple[Path, int, np.ndarray]]:
+        """Yield ``(path, view, features)`` for every path and view, in input order.
 
-        Crops are accumulated across images and forwarded together, so a
+        Each path contributes ``views`` results, view 0 first. Crops are
+        accumulated across images *and* views and forwarded together, so a
         batch stays full even when each image contributes only a few crops.
-        When a ``cache`` is given, an image whose features are already
-        cached is never decoded twice: it is read back from disk, and newly
-        computed features are written before they are yielded.
+        When a ``cache`` is given, a view whose features are already cached is
+        never recomputed; an image is decoded only if at least one of its
+        views missed. Newly computed features are written before they are
+        yielded.
 
         Args:
             paths: Image paths to process, in the order results are wanted.
@@ -303,14 +398,13 @@ class FeatureExtractor:
         all_paths = [Path(path) for path in paths]
 
         for path in all_paths:
-            pending = self._prepare(path, cache)
-            if pending.features is not None:
-                self.cache_hits += 1
-            queue.append(pending)
-            queued_crops += len(pending.crops)
+            pendings = self._prepare(path, cache)
+            self.cache_hits += sum(1 for pending in pendings if pending.features is not None)
+            queue.extend(pendings)
+            queued_crops += sum(len(pending.crops) for pending in pendings)
+            done += 1
             if queued_crops >= self.batch_size:
                 yield from self._flush(queue, cache)
-                done += len(queue)
                 queue, queued_crops = [], 0
                 if progress and done - reported >= _PROGRESS_EVERY:
                     print(f"[features] {done}/{len(all_paths)} images")
@@ -318,39 +412,57 @@ class FeatureExtractor:
 
         if queue:
             yield from self._flush(queue, cache)
-            done += len(queue)
         if progress:
             print(f"[features] {done}/{len(all_paths)} images")
 
-    def _prepare(self, path: Path, cache: FeatureCache | None) -> _Pending:
-        """Read one image, answering from ``cache`` when possible.
+    def _prepare(self, path: Path, cache: FeatureCache | None) -> list[_Pending]:
+        """Read one image's views, answering from ``cache`` where possible.
 
-        On a cache hit only the file's bytes are hashed -- the image is
-        never decoded and no crop is cut.
+        On an all-hit image only the file's bytes are hashed -- the image is
+        never decoded and no crop is cut. View 0 is keyed with no
+        augmentation attached even when this extractor has one, because view
+        0 is un-augmented by construction: that keeps it interchangeable with
+        the features a plain (un-augmented) extraction wrote, instead of
+        caching identical pixels twice under two names.
         """
         data = path.read_bytes()
-        key: CacheKey | None = None
-        if cache is not None:
-            key = cache.key_for(hashlib.sha256(data).hexdigest(), self.spec.name, self.crop_policy)
-            cached = cache.get(key)
-            if cached is not None:
-                return _Pending(path=path, key=key, features=cached)
+        digest = hashlib.sha256(data).hexdigest()
 
-        image = ForensicImage.from_bytes(data, path=path)
-        crops = crops_for(image.rgb, self.crop_policy, seed_material=image.raw)
-        return _Pending(path=path, key=key, crops=list(crops))
+        pendings: list[_Pending] = []
+        for view in range(self.views):
+            key: CacheKey | None = None
+            if cache is not None:
+                key = cache.key_for(
+                    digest,
+                    self.spec.name,
+                    self.crop_policy,
+                    augment=None if view == 0 else self.augment,
+                    view=view,
+                )
+                cached = cache.get(key)
+                if cached is not None:
+                    pendings.append(_Pending(path=path, view=view, key=key, features=cached))
+                    continue
+            pendings.append(_Pending(path=path, view=view, key=key))
+
+        missing = [pending for pending in pendings if pending.features is None]
+        if missing:
+            image = ForensicImage.from_bytes(data, path=path)
+            for pending in missing:
+                pending.crops = self._crops_for_view(image, pending.view)
+        return pendings
 
     def _flush(
         self, queue: Sequence[_Pending], cache: FeatureCache | None
-    ) -> Iterator[tuple[Path, np.ndarray]]:
-        """Forward every queued image's crops in one go and yield results in order."""
+    ) -> Iterator[tuple[Path, int, np.ndarray]]:
+        """Forward every queued view's crops in one go and yield results in order."""
         batch_crops = [crop for pending in queue for crop in pending.crops]
         stacked = self._forward(batch_crops) if batch_crops else None
 
         offset = 0
         for pending in queue:
             if pending.features is not None:
-                yield pending.path, pending.features
+                yield pending.path, pending.view, pending.features
                 continue
             count = len(pending.crops)
             if stacked is None:  # pragma: no cover - a queued miss always has crops
@@ -359,7 +471,7 @@ class FeatureExtractor:
             offset += count
             if cache is not None and pending.key is not None:
                 cache.put(pending.key, features, layers=self.spec.layers)
-            yield pending.path, features
+            yield pending.path, pending.view, features
 
 
 def extract_to_cache(
@@ -370,10 +482,11 @@ def extract_to_cache(
 ) -> dict[str, float | int | str]:
     """Extract and cache features for ``paths``, returning a small run summary.
 
-    Returns a mapping with ``images``, ``cache_hits`` (how many of them were
-    already cached, and so skipped the backbone), ``elapsed_s``,
-    ``images_per_s``, ``cache_bytes`` and ``feature_shape`` (as a string),
-    which is what the CLI prints.
+    Returns a mapping with ``images``, ``views``, ``arrays`` (one per
+    image-view pair, so ``images * views`` when every view is produced),
+    ``cache_hits`` (how many of those arrays were already cached, and so
+    skipped the backbone), ``elapsed_s``, ``images_per_s``, ``cache_bytes``
+    and ``feature_shape`` (as a string), which is what the CLI prints.
 
     ``elapsed_s`` covers the whole call, including the one-off backbone load
     (and, on the very first run, the weight download) that the first uncached
@@ -382,16 +495,20 @@ def extract_to_cache(
     """
     start = time.perf_counter()
     shape: tuple[int, ...] | None = None
-    count = 0
-    for _, features in extractor.features_for_paths(paths, cache=cache, progress=progress):
+    arrays = 0
+    images: set[Path] = set()
+    for path, _, features in extractor.features_for_paths(paths, cache=cache, progress=progress):
         shape = features.shape
-        count += 1
+        arrays += 1
+        images.add(path)
     elapsed = time.perf_counter() - start
     return {
-        "images": count,
+        "images": len(images),
+        "views": extractor.views,
+        "arrays": arrays,
         "cache_hits": extractor.cache_hits,
         "elapsed_s": elapsed,
-        "images_per_s": (count / elapsed) if elapsed > 0 else 0.0,
+        "images_per_s": (len(images) / elapsed) if elapsed > 0 else 0.0,
         "cache_bytes": cache.size_bytes(),
         "feature_shape": str(shape) if shape is not None else "-",
     }

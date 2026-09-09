@@ -15,7 +15,6 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
-import imgforensics.signals  # noqa: F401  (side effect: registers all seven signals)
 from imgforensics import __version__, detectors
 from imgforensics.core import registry
 from imgforensics.core.image import ForensicImage
@@ -36,17 +35,21 @@ from imgforensics.data import (
 )
 from imgforensics.detectors import BACKBONES, CropPolicy, FeatureCache, FeatureExtractor
 from imgforensics.detectors.features import extract_to_cache
+from imgforensics.eval.preprocess import AugmentationConfig
 from imgforensics.eval.robustness import RobustnessSuite
 from imgforensics.eval.runner import BenchmarkConfig, run_benchmark
+from imgforensics.signals import SIGNAL_NAMES  # also registers all seven signal detectors
 from imgforensics.utils.image_io import image_hash
 
 app = typer.Typer(help="Detect AI-generated images, AI-inpainted regions, and manipulations.")
 datasets_app = typer.Typer(help="Browse the external dataset registry.")
 manifest_app = typer.Typer(help="Build dataset manifests.")
 features_app = typer.Typer(help="Extract and cache frozen-backbone features.")
+train_app = typer.Typer(help="Train the learned detectors' heads.")
 app.add_typer(datasets_app, name="datasets")
 app.add_typer(manifest_app, name="manifest")
 app.add_typer(features_app, name="features")
+app.add_typer(train_app, name="train")
 console = Console()
 # A wider, fixed-width console for the dataset-registry tables: names and
 # license strings are long enough that the default (terminal-detected, often
@@ -243,7 +246,7 @@ def benchmark(
     ] = None,
     all_signals: Annotated[
         bool,
-        typer.Option("--all-signals", help="Include every registered signal detector."),
+        typer.Option("--all-signals", help="Include every classical signal detector."),
     ] = False,
     baselines: Annotated[
         bool,
@@ -280,7 +283,9 @@ def benchmark(
 
     names = set(detector or [])
     if all_signals:
-        names |= set(registry.available())
+        # The signals only: the registry can also hold the learned detector,
+        # which --detector dinov2_head selects explicitly.
+        names |= set(SIGNAL_NAMES)
     unknown = sorted(names - set(registry.available()))
     if unknown:
         raise typer.BadParameter(
@@ -502,6 +507,23 @@ def features_extract(
     device: Annotated[
         str, typer.Option("--device", help="auto, cpu, cuda, or an explicit torch device.")
     ] = "auto",
+    augment: Annotated[
+        Path | None,
+        typer.Option(
+            "--augment",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help=(
+                "AugmentationConfig YAML applied to views above 0 "
+                "(e.g. configs/augment_default.yaml)."
+            ),
+        ),
+    ] = None,
+    views: Annotated[
+        int,
+        typer.Option("--views", help="Views per image; view 0 is un-augmented, 1..K-1 augmented."),
+    ] = 1,
 ) -> None:
     """Extract frozen-backbone features for every manifest image, caching them on disk."""
     _require_ml()
@@ -512,6 +534,13 @@ def features_extract(
         )
     if crop_mode not in ("center", "grid", "random"):
         raise typer.BadParameter(f"Unknown crop mode {crop_mode!r}. Use center, grid, or random.")
+    if views < 1:
+        raise typer.BadParameter(f"--views must be at least 1, got {views}.")
+    if views > 1 and augment is None:
+        raise typer.BadParameter(
+            "--views above 1 without --augment would cache identical copies of view 0; "
+            "pass --augment configs/augment_default.yaml."
+        )
 
     manifest = Manifest.load(manifest_path)
     entries = manifest.entries[:limit] if limit is not None else manifest.entries
@@ -522,11 +551,18 @@ def features_extract(
     policy = CropPolicy.model_validate(
         {"size": spec.input_size, "mode": crop_mode, "max_crops": max_crops}
     )
-    extractor = FeatureExtractor(backbone=backbone, device=device, crop_policy=policy)
+    augmentation = AugmentationConfig.from_yaml(augment) if augment is not None else None
+    extractor = FeatureExtractor(
+        backbone=backbone,
+        device=device,
+        crop_policy=policy,
+        augment=augmentation,
+        views=views,
+    )
     cache = FeatureCache(cache_dir)
 
     console.print(
-        f"Extracting {backbone} features for {len(paths)} image(s) "
+        f"Extracting {backbone} features for {len(paths)} image(s) x {views} view(s) "
         f"into {cache_dir} (crop mode {crop_mode}, up to {max_crops} crops of {spec.input_size}px)"
     )
     summary = extract_to_cache(paths, cache, extractor, progress=True)
@@ -537,6 +573,8 @@ def features_extract(
     table.add_column("value")
     table.add_row("device", str(extractor.device))
     table.add_row("images", str(summary["images"]))
+    table.add_row("views", str(summary["views"]))
+    table.add_row("feature arrays", str(summary["arrays"]))
     table.add_row("cache hits (skipped)", str(summary["cache_hits"]))
     table.add_row("feature shape", str(summary["feature_shape"]))
     table.add_row("elapsed", f"{float(summary['elapsed_s']):.2f} s")
@@ -564,6 +602,87 @@ def features_info(
     table.add_row("total", str(sum(counts.values())))
     console.print(table)
     console.print(f"Cache size: {cache.size_bytes() / _BYTES_PER_MIB:.2f} MiB")
+
+
+@train_app.command("head")
+def train_head_command(
+    config_path: Annotated[
+        Path,
+        typer.Option(
+            "--config",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help="Training config YAML (see configs/head_dinov2.yaml).",
+        ),
+    ],
+    epochs: Annotated[
+        int | None, typer.Option("--epochs", help="Override the config's epoch count.")
+    ] = None,
+    out: Annotated[
+        Path | None, typer.Option("--out", help="Override the config's output directory.")
+    ] = None,
+) -> None:
+    """Train a head on cached frozen-backbone features and write a calibrated checkpoint."""
+    _require_ml()
+
+    # Imported here, not at module scope: this is the one command that needs
+    # torch, and paying its import on every other command would be wasteful.
+    from imgforensics.detectors.learned import HEAD_DIR_ENV
+    from imgforensics.detectors.train import TrainConfig, train_head
+
+    config = TrainConfig.from_yaml(config_path)
+    overrides: dict[str, Any] = {}
+    if epochs is not None:
+        overrides["epochs"] = epochs
+    if out is not None:
+        overrides["out_dir"] = out
+    if overrides:
+        config = config.model_copy(update=overrides)
+
+    for manifest_field in (config.train_manifest, config.val_manifest):
+        if not Path(manifest_field).is_file():
+            raise typer.BadParameter(
+                f"Manifest {manifest_field} does not exist. Build one with "
+                "'imgforensics manifest build' or 'imgforensics datasets prepare'."
+            )
+
+    console.print(
+        f"Training a {config.backbone} head on {config.train_manifest} "
+        f"({config.views} view(s), up to {config.epochs} epochs) -> {config.out_dir}"
+    )
+    report = train_head(config, progress=True)
+    meta = report.meta
+
+    table = Table(title="Training report")
+    table.add_column("field", style="bold")
+    table.add_column("value")
+    table.add_row("device", config.device)
+    table.add_row("head parameters", f"{report.head_parameters:,}")
+    table.add_row("train crops / images", f"{report.train_crops} / {report.train_images}")
+    table.add_row("val crops / images", f"{report.val_crops} / {report.val_images}")
+    table.add_row("epochs run (best)", f"{meta.epochs_run} ({meta.best_epoch})")
+    table.add_row("val AUC", f"{meta.val.auc:.4f}")
+    table.add_row("val balanced acc @0.5", f"{meta.val.balanced_accuracy:.4f}")
+    table.add_row(
+        "val balanced acc @tuned",
+        f"{meta.val.balanced_accuracy_tuned:.4f} (t={meta.val.threshold:.3f})",
+    )
+    table.add_row("ECE before -> after", f"{meta.val.ece_before:.4f} -> {meta.val.ece_after:.4f}")
+    table.add_row(
+        "calibration", f"T={meta.calibration.temperature:.3f}, b={meta.calibration.bias:.3f}"
+    )
+    table.add_row("layer weights", ", ".join(f"{value:.3f}" for value in report.layer_weights))
+    table.add_row("commercial_ok", "-" if meta.commercial_ok is None else str(meta.commercial_ok))
+    table.add_row("licenses", ", ".join(meta.licenses) or "-")
+    table.add_row("elapsed", f"{report.elapsed_s:.2f} s")
+    console.print(table)
+    console.print(f"Wrote {report.weights_path}, {report.metadata_path} and {report.log_path}")
+    console.print(
+        f"Use it with: set {HEAD_DIR_ENV}={report.out_dir} "
+        "(or copy it to weights/dinov2_head), then run "
+        "'imgforensics analyze IMAGE --detector dinov2_head'"
+    )
 
 
 @manifest_app.command("build")

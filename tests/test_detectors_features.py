@@ -170,7 +170,8 @@ def test_features_for_paths_caches_and_then_skips_the_backbone(
     first = FeatureExtractor(device="cpu", crop_policy=policy, batch_size=3)
     computed = list(first.features_for_paths(paths, cache=cache, progress=False))
 
-    assert [path for path, _ in computed] == paths
+    assert [path for path, _, _ in computed] == paths
+    assert [view for _, view, _ in computed] == [0] * len(paths)
     assert first.cache_hits == 0
     assert len(list(cache.entries())) == 4
 
@@ -183,8 +184,8 @@ def test_features_for_paths_caches_and_then_skips_the_backbone(
     reused = list(second.features_for_paths(paths, cache=cache, progress=False))
 
     assert second.cache_hits == len(paths)
-    assert [path for path, _ in reused] == paths
-    for (_, fresh), (_, cached) in zip(computed, reused, strict=True):
+    assert [path for path, _, _ in reused] == paths
+    for (_, _, fresh), (_, _, cached) in zip(computed, reused, strict=True):
         assert np.allclose(fresh, cached, atol=0.05)
 
 
@@ -203,7 +204,7 @@ def test_features_for_paths_preserves_order_with_a_partly_warm_cache(
     mixed = FeatureExtractor(device="cpu", crop_policy=policy, batch_size=2)
     results = list(mixed.features_for_paths(paths, cache=cache, progress=False))
 
-    assert [path for path, _ in results] == paths
+    assert [path for path, _, _ in results] == paths
     assert mixed.cache_hits == 1
 
 
@@ -260,3 +261,150 @@ def test_cli_features_extract_rejects_unknown_backbone_and_crop_mode(tmp_path: P
 
     assert unknown_backbone.exit_code != 0
     assert unknown_mode.exit_code != 0
+
+
+def _augmentation() -> Any:
+    """A cheap but visible augmentation: always resize down-and-up, nothing else."""
+    from imgforensics.eval.preprocess import AugmentationConfig
+
+    return AugmentationConfig(downscale_upscale=(0.5, 0.6), p=1.0)
+
+
+def test_cache_key_depends_on_the_augmentation_and_the_view(tmp_path: Path) -> None:
+    cache = FeatureCache(tmp_path)
+    policy = CropPolicy()
+    plain = cache.key_for("a" * 64, "dinov2_vitb14", policy)
+    augmented = cache.key_for("a" * 64, "dinov2_vitb14", policy, augment=_augmentation())
+    second_view = cache.key_for("a" * 64, "dinov2_vitb14", policy, augment=_augmentation(), view=1)
+
+    # View 0 with no augmentation keeps the pre-augmentation file name, so a
+    # cache filled by an older run still answers.
+    assert plain.filename == f"{'a' * 64}_dinov2_vitb14_{policy.fingerprint()}.npz"
+    assert plain.filename != augmented.filename
+    assert augmented.filename != second_view.filename
+    assert second_view.filename.endswith("_v1.npz")
+
+
+def test_stats_reads_the_backbone_name_from_both_file_name_forms(tmp_path: Path) -> None:
+    cache = FeatureCache(tmp_path / "features")
+    policy = CropPolicy()
+    array = np.zeros((1, 5, 8), dtype=np.float32)
+    cache.put(cache.key_for("a" * 64, "dinov2_vitb14", policy), array)
+    cache.put(
+        cache.key_for("a" * 64, "dinov2_vitb14", policy, augment=_augmentation(), view=1), array
+    )
+    cache.put(
+        cache.key_for("b" * 64, "clip_vitl14", policy, augment=_augmentation(), view=2), array
+    )
+
+    assert cache.stats() == {"dinov2_vitb14": 2, "clip_vitl14": 1}
+
+
+def test_views_produce_one_result_per_view_and_augmented_views_differ(
+    tmp_path: Path, tiny_backbone: Any
+) -> None:
+    root = tmp_path / "images"
+    _write_images(root, 2)
+    paths = sorted(root.rglob("*.png"))
+    cache = FeatureCache(tmp_path / "features")
+    policy = CropPolicy(size=224, mode="grid", max_crops=1)
+
+    extractor = FeatureExtractor(
+        device="cpu", crop_policy=policy, batch_size=4, augment=_augmentation(), views=3
+    )
+    results = list(extractor.features_for_paths(paths, cache=cache, progress=False))
+
+    assert [(path, view) for path, view, _ in results] == [
+        (path, view) for path in paths for view in range(3)
+    ]
+    assert len(list(cache.entries())) == len(paths) * 3
+
+    by_view = {view: features for path, view, features in results if path == paths[0]}
+    # View 0 is the image untouched; every augmented view differs from it and
+    # from the other augmented views (each has its own seed).
+    assert not np.allclose(by_view[0], by_view[1], atol=1e-3)
+    assert not np.allclose(by_view[1], by_view[2], atol=1e-3)
+
+
+def test_view_zero_is_shared_with_an_un_augmented_extraction(
+    tmp_path: Path, tiny_backbone: Any
+) -> None:
+    root = tmp_path / "images"
+    _write_images(root, 2)
+    paths = sorted(root.rglob("*.png"))
+    cache = FeatureCache(tmp_path / "features")
+    policy = CropPolicy(size=224, mode="grid", max_crops=1)
+
+    plain = FeatureExtractor(device="cpu", crop_policy=policy)
+    list(plain.features_for_paths(paths, cache=cache, progress=False))
+
+    augmented = FeatureExtractor(device="cpu", crop_policy=policy, augment=_augmentation(), views=2)
+    results = list(augmented.features_for_paths(paths, cache=cache, progress=False))
+
+    # View 0 is un-augmented by construction, so it re-uses what the plain run
+    # cached; only the augmented view had to be computed.
+    assert augmented.cache_hits == len(paths)
+    assert [view for _, view, _ in results] == [0, 1, 0, 1]
+
+
+def test_augmented_views_are_reproducible_and_seeded_per_view() -> None:
+    """Two extractors must cut identical pixels for a view; only the seed decides.
+
+    Checked on the crops rather than the features because the stand-in
+    backbone is randomly initialised per instance -- reproducibility of the
+    *augmentation* is what this pins.
+    """
+    policy = CropPolicy(size=224, mode="grid", max_crops=1)
+    image = _forensic_image(seed=11)
+
+    def crops(view: int, seed: int = 0) -> np.ndarray:
+        extractor = FeatureExtractor(
+            device="cpu",
+            crop_policy=policy.model_copy(update={"seed": seed}),
+            augment=_augmentation(),
+            views=3,
+        )
+        return np.asarray(extractor._crops_for_view(image, view)[0])
+
+    assert np.array_equal(crops(1), crops(1))
+    assert not np.array_equal(crops(1), crops(2))
+    assert not np.array_equal(crops(1), crops(1, seed=7))
+    assert np.array_equal(crops(0), np.asarray(_forensic_image(seed=11).rgb.crop((0, 0, 224, 224))))
+
+
+def test_cli_features_extract_with_views_and_augment(tmp_path: Path, tiny_backbone: Any) -> None:
+    root = tmp_path / "images"
+    _write_images(root, 2)
+    manifest, _ = build_manifest(
+        root, dataset="tiny", label_of=label_from_parent_folder, progress=False
+    )
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest.save(manifest_path)
+    cache_dir = tmp_path / "cache"
+
+    result = runner.invoke(
+        app,
+        [
+            "features",
+            "extract",
+            str(manifest_path),
+            "--cache-dir",
+            str(cache_dir),
+            "--device",
+            "cpu",
+            "--max-crops",
+            "1",
+            "--views",
+            "2",
+            "--augment",
+            "configs/augment_default.yaml",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert len(list(FeatureCache(cache_dir).entries())) == 4
+
+    without_augment = runner.invoke(
+        app, ["features", "extract", str(manifest_path), "--views", "2"]
+    )
+    assert without_augment.exit_code != 0

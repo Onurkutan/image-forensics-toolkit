@@ -167,6 +167,59 @@ use and cached there; set `IMGFORENSICS_WEIGHTS_DIR` to keep them in the
 project's gitignored `weights/` directory instead. See
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for each model's license.
 
+### Training a head
+
+The backbone stays frozen; the only thing that trains is a ~1.06 M-parameter
+head (per-layer LayerNorm + projection, learned layer-importance weights, and
+a small MLP) over the cached features. On the cached features that is minutes,
+not hours.
+
+```bash
+# 1. Cache features. --views 2 adds one augmented copy per image on top of the
+#    un-augmented view 0, so the head never learns the training set's own
+#    JPEG history. (Optional -- `train head` extracts anything missing itself.)
+imgforensics features extract data/manifests/train.jsonl     --cache-dir data/features --views 2 --augment configs/augment_default.yaml
+
+# 2. Train, calibrate and write the checkpoint.
+imgforensics train head --config configs/head_dinov2.yaml [--epochs N] [--out DIR]
+```
+
+Augmented views are part of the cache key, so switching augmentation policies
+never silently reuses the wrong features, and view 0 is shared with a plain
+extraction because it is un-augmented by construction. `configs/augment_default.yaml`
+is the packaged policy: JPEG Q30–95 (p 0.7), WEBP Q40–95, downscale-upscale,
+blur, noise and cut-out, each at its own rate.
+
+**Where the checkpoint lands.** `configs/head_dinov2.yaml` writes
+`weights/dinov2_head/` (gitignored), holding three files: `head.safetensors`
+(the weights), `head.json` (everything needed to reuse them) and
+`training_log.jsonl` (one line per epoch). Training keeps the best
+image-level validation AUC, early-stops, then fits a temperature and bias on
+the validation split and reports the ECE before and after — a calibration
+that does not reduce the ECE is not applied, and the checkpoint says so.
+
+**How `analyze` picks it up.** The learned detector is registered as
+`dinov2_head` and runs alongside the classical signals, but only when the `ml`
+extra is installed. It looks for its checkpoint in `weights/dinov2_head/`, or
+wherever `IMGFORENSICS_HEAD_DIR` points:
+
+```bash
+IMGFORENSICS_HEAD_DIR=weights/my_head imgforensics analyze image.jpg --detector dinov2_head
+```
+
+It crops the image per the checkpoint's own crop policy, scores each crop, and
+reports the mean calibrated probability plus a heatmap with each crop's
+probability painted over the region it came from. **With no checkpoint
+installed it abstains** — score 0.5, label `uncertain`, and a `reason` saying
+where it looked — rather than failing the run.
+
+**The checkpoint records its training data's licenses.** `head.json` carries
+each training and validation manifest's name, entry count, file sha256,
+license string, and the `commercial_ok` flag ANDed across them (`null` when
+any source is unverified, `false` when any is research-only). A head trained
+on research-only data is itself research-only, and this is the only place that
+fact survives the move from data to model.
+
 ## Roadmap
 
 See [docs/ROADMAP.md](docs/ROADMAP.md).

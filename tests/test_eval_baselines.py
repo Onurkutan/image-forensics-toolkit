@@ -12,6 +12,7 @@ from imgforensics.eval.baselines import (
     SignalsMeanDetector,
     baseline_detectors,
 )
+from imgforensics.signals import SIGNAL_NAMES
 
 
 def test_baselines_are_not_in_the_global_registry() -> None:
@@ -54,7 +55,11 @@ def test_signals_mean_detector_averages_every_registered_signal() -> None:
     result = detector.predict(image)
 
     per_signal = result.details["per_signal"]
-    assert set(per_signal) == set(registry.available())
+    # Every classical signal, and nothing else: the registry may also hold the
+    # learned detector when the optional ml extra is installed, and a baseline
+    # that absorbed it would no longer be the floor it is meant to be.
+    assert set(per_signal) == set(SIGNAL_NAMES)
+    assert set(SIGNAL_NAMES) <= set(registry.available())
     assert result.score == sum(per_signal.values()) / len(per_signal)
 
 

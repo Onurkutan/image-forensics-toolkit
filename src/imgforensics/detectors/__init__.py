@@ -8,6 +8,13 @@ and :mod:`~imgforensics.detectors.features` (the feature cache) are pure
 numpy/PIL at import time, and every ``torch`` import sits inside the function
 that needs it. Callers that need to know whether the extra is present ask
 :func:`is_ml_available` rather than catching :class:`ImportError`.
+
+Importing this package registers the learned detector ``dinov2_head`` with
+:mod:`imgforensics.core.registry` -- but only when the ``ml`` extra is
+present, so ``imgforensics analyze`` on a torch-free machine offers exactly
+the detectors it did before. :mod:`imgforensics.detectors.learned` itself
+imports no torch at module scope, so the registration costs nothing at
+startup even where the extra *is* installed.
 """
 
 from __future__ import annotations
@@ -21,7 +28,14 @@ from imgforensics.detectors.backbones import (
     normalization_for,
     resolve_device,
 )
-from imgforensics.detectors.crops import CropPolicy, crops_for, to_array, to_tensor
+from imgforensics.detectors.crops import (
+    CropBox,
+    CropPolicy,
+    crop_boxes,
+    crops_for,
+    to_array,
+    to_tensor,
+)
 from imgforensics.detectors.features import (
     CacheKey,
     FeatureCache,
@@ -46,13 +60,20 @@ def is_ml_available() -> bool:
         return False
 
 
+if is_ml_available():  # pragma: no cover - the branch taken depends on the install
+    # Side effect: registers the "dinov2_head" learned detector. Imported here
+    # rather than at the top so the statement above decides whether it happens.
+    from imgforensics.detectors import learned  # noqa: F401
+
 __all__ = [
     "BACKBONES",
     "BackboneSpec",
     "CacheKey",
+    "CropBox",
     "CropPolicy",
     "FeatureCache",
     "FeatureExtractor",
+    "crop_boxes",
     "crops_for",
     "extract_to_cache",
     "get_backbone",

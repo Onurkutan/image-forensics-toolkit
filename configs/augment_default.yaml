@@ -1,0 +1,39 @@
+# Default training-time augmentation for the learned detectors
+# (imgforensics.eval.preprocess.AugmentationConfig).
+#
+# The recipe from docs/research/01_ai_generated_image_detection.md, section 7a:
+# "crop, never resize; augment with JPEG Q30-95, WEBP, blur, downscale-then-
+# upscale, noise, cut-out". The point is not to make the task harder for its
+# own sake but to destroy the shortcuts -- a detector trained on pristine PNG
+# fakes against JPEG reals learns the compression history, not the generator.
+#
+# Each entry is a [low, high] range sampled uniformly when that augmentation
+# fires; `probabilities` gives the per-augmentation firing rate. The rates are
+# ordered by how common the degradation is in the wild: nearly everything on
+# the web has been JPEG-compressed, heavy blur and occlusion are rare.
+#
+# Used by: imgforensics features extract --augment configs/augment_default.yaml
+#          imgforensics train head --config configs/head_dinov2.yaml
+#
+# Never use this at evaluation time -- the fixed, versioned protocol for that
+# is imgforensics.eval.robustness (eval/robustness_default.yaml).
+
+jpeg_quality: [30, 95]
+webp_quality: [40, 95]
+downscale_upscale: [0.5, 0.9]
+gaussian_blur_sigma: [0.3, 1.2]
+noise_sigma: [1.0, 6.0]
+cutout:
+  size: 32
+  count: 1
+
+# Fallback rate for any augmentation not listed below.
+p: 0.5
+
+probabilities:
+  jpeg_quality: 0.7
+  webp_quality: 0.3
+  downscale_upscale: 0.3
+  gaussian_blur_sigma: 0.2
+  noise_sigma: 0.3
+  cutout: 0.2

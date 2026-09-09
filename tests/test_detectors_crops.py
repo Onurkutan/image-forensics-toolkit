@@ -33,7 +33,8 @@ from imgforensics.detectors.backbones import (
     _apply_weights_dir_env,
     get_backbone,
 )
-from imgforensics.detectors.crops import CropPolicy, crops_for, to_array
+from imgforensics.detectors.crops import CropPolicy, crop_boxes, crops_for, to_array
+from imgforensics.eval.preprocess import center_crop, random_crops
 
 _CROP_SIZE = 224
 
@@ -191,10 +192,15 @@ def test_detectors_package_imports_without_torch_or_timm() -> None:
         sys.meta_path.insert(0, Blocker())
 
         import imgforensics.cli  # noqa: F401
+        import imgforensics.signals  # noqa: F401
         import imgforensics.detectors as detectors
+
+        from imgforensics.core import registry
 
         assert detectors.is_ml_available() is False
         assert not blocked & set(sys.modules)
+        assert "dinov2_head" not in registry.available()
+        assert "metadata" in registry.available()
         print("imported cleanly")
         """
     )
@@ -257,3 +263,52 @@ def test_weights_dir_env_redirects_the_hub_cache(
     assert weights.is_dir()
     assert os.environ["HF_HOME"] == str(weights)
     assert os.environ["HF_HUB_CACHE"] == str(weights / "hub")
+
+
+@pytest.mark.parametrize("mode", ["center", "grid", "random"])
+def test_crop_boxes_describe_exactly_what_crops_for_cut(mode: str) -> None:
+    image = natural_like_image(size=(600, 500), seed=11)
+    policy = CropPolicy(size=_CROP_SIZE, mode=mode, max_crops=3)
+
+    crops = crops_for(image, policy, seed_material=b"material")
+    boxes = crop_boxes(image, policy, seed_material=b"material")
+
+    assert len(boxes) == len(crops)
+    array = _as_array(image)
+    for crop, box in zip(crops, boxes, strict=True):
+        assert (box.height, box.width) == (_CROP_SIZE, _CROP_SIZE)  # no padding at this size
+        region = array[box.top : box.top + box.height, box.left : box.left + box.width]
+        assert np.array_equal(region, _as_array(crop))
+
+
+def test_crop_boxes_are_clipped_to_a_reflection_padded_image() -> None:
+    image = natural_like_image(size=(100, 80), seed=12)
+    boxes = crop_boxes(image, CropPolicy(size=_CROP_SIZE, mode="center"))
+
+    assert len(boxes) == 1
+    box = boxes[0]
+    assert (box.top, box.left) == (0, 0)
+    assert (box.height, box.width) == (80, 100)  # the whole image, and no more
+    assert not box.is_empty
+
+
+def test_crops_for_still_matches_the_shared_preprocess_helpers() -> None:
+    """The crop policy and the eval-side helpers must agree pixel-for-pixel.
+
+    ``crops_for`` places its crops itself (so ``crop_boxes`` can report the
+    same rectangles) rather than delegating to these helpers; a cached
+    feature would silently change meaning if the two ever drifted apart.
+    """
+    image = natural_like_image(size=(600, 500), seed=13)
+    policy = CropPolicy(size=_CROP_SIZE, mode="center")
+
+    assert np.array_equal(
+        _as_array(crops_for(image, policy)[0]), _as_array(center_crop(image, _CROP_SIZE))
+    )
+
+    random_policy = CropPolicy(size=_CROP_SIZE, mode="random", max_crops=3, seed=5)
+    seed = crops_module._seed_for(random_policy, b"material")
+    expected = random_crops(image, _CROP_SIZE, 3, seed)
+    produced = crops_for(image, random_policy, seed_material=b"material")
+    for first, second in zip(produced, expected, strict=True):
+        assert np.array_equal(_as_array(first), _as_array(second))
