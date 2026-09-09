@@ -12,3 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Project skeleton, core types, CLI stub, CI
 - Literature surveys on AI-generated image detection, manipulation localization, and classical forensic signals (docs/research/)
 - Development roadmap (docs/ROADMAP.md)
+- `ForensicImage` input type carrying original bytes
+- metadata signal (EXIF, editor and AI-generator markers, thumbnail consistency, JPEG quality estimate)
+- ELA signal with heatmap
+- CLI: per-signal cards, `--json`, `--save-heatmaps`, `--detector`
+
+### Changed
+
+- `BaseDetector.predict` now takes `ForensicImage`

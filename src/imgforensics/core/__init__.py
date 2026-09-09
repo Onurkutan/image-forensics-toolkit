@@ -1,1 +1,1 @@
-"""Core types, base classes, and registry shared across imgforensics."""
+"""Core types, base classes, image input type, and registry shared across imgforensics."""
