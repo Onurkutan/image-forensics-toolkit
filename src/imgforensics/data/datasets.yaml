@@ -1,0 +1,541 @@
+# Dataset registry data.
+#
+# Catalogue of external datasets usable for AI-generated-image detection and
+# manipulation-localization work. Each entry records where to obtain a
+# dataset, its license, and a best-effort `commercial_ok` flag so a
+# downstream training or evaluation config can filter on it with one
+# predicate.
+#
+# `verified: true` means someone opened a primary source for that entry (its
+# project page, GitHub/Hugging Face/Zenodo listing, or official download
+# page) and checked license/access/size against it on the `verified_on`
+# date. `verified: false` means no primary source could be reached or
+# located; treat every field on that entry -- especially `license` and
+# `commercial_ok` -- as unconfirmed. `homepage` and `download` are always
+# either a real URL or null, never a prose description.
+#
+# Third-party datasets are never redistributed by this project: this file
+# only records where to obtain each one and its license.
+
+datasets:
+  - name: "Community Forensics"
+    task: "detection"
+    homepage: "https://jespark.net/projects/2024/community_forensics/"
+    download: "https://huggingface.co/datasets/OwensLab/CommunityForensics"
+    access: "open"
+    license: "CC-BY-4.0, for research purposes only; per-image licenses mostly CreativeML OpenRAIL-M"
+    commercial_ok: false
+    approx_size_gb: 1080.0
+    images: "2,760,270 images from 4,803 generator models (Systematic 1.92M / Manual 774K / Commercial 14.9K / PublicEval 51.8K)"
+    generators: "4,803 community-collected latent diffusion checkpoints, mostly open-source plus some commercial APIs"
+    masks: false
+    citation: "arXiv:2411.04125 (Park & Owens, CVPR 2025)"
+    notes: >-
+      Reals are LAION 40.3%, ImageNet 40.3%, plus CelebA/COCO/FFHQ; mixed
+      PNG/JPEG bytes in Parquet shards, so check the real/fake format split
+      for bias before training. The Hugging Face dataset viewer notes
+      downloading the full set may use up to 2.2 TB (1.1 TB data + 1.1 TB
+      re-indexed Arrow files); a much smaller "-Small" subset with
+      redistributable reals is also documented on the dataset card for
+      disk-constrained setups.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "Synthbuster"
+    task: "detection"
+    homepage: "https://github.com/qbammey/synthbuster"
+    download: "https://zenodo.org/records/10066460"
+    access: "open"
+    license: "CC BY-NC-SA 4.0 (Zenodo record); paired real images are RAISE-1k photos under RAISE's own non-commercial terms"
+    commercial_ok: false
+    approx_size_gb: 12.4
+    images: "9 x 1,000 fakes (9,000 total); paired against 1,000 RAISE-1k reals obtained separately"
+    generators: "DALL-E 2/3, Adobe Firefly, Midjourney v5, Stable Diffusion 1.3/1.4/2/XL, GLIDE"
+    masks: false
+    citation: "doi:10.1109/OJSP.2023.3337714 (Bammey, IEEE Open Journal of Signal Processing, 2024)"
+    notes: >-
+      Real images are uncompressed RAISE frames paired against compressed
+      generator output -- a format-bias risk if used for training rather
+      than testing. Best used as a test-only set (~12 GB zip).
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "ITW-SM"
+    task: "detection"
+    homepage: "https://mever-team.github.io/itw-sm"
+    download: "https://huggingface.co/datasets/dkarageo/itw-sm"
+    access: "open"
+    license: "CC BY-SA 4.0"
+    commercial_ok: true
+    approx_size_gb: null
+    images: "10,000 (5,000 real / 5,000 AI-generated), 0.1 MP to 45 MP"
+    generators: "in-the-wild, mixed/unlisted"
+    masks: false
+    citation: "arXiv:2507.10236 (MAD '26 workshop, 2026)"
+    notes: >-
+      Sourced from Facebook, Instagram, LinkedIn, and X with original
+      platform compression preserved. A realistic small in-the-wild test
+      set.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "WildRF"
+    task: "detection"
+    homepage: "https://github.com/barcavia/RealTime-DeepfakeDetection-in-the-RealWorld"
+    download: "https://drive.google.com/file/d/1A0xoL44Yg68ixd-FuIJn2VC4vdZ6M2gn/view"
+    access: "open"
+    license: "Yissum Software Research License (repo code): research use only; commercial use requires a separate Yissum commercial license"
+    commercial_ok: false
+    approx_size_gb: null
+    images: "Reddit 2,150/2,150; X (Twitter) 340/340; Facebook 160/160 real/fake pairs"
+    generators: "unknown, in-the-wild"
+    masks: false
+    citation: "arXiv:2406.09398"
+    notes: >-
+      Tiny test-only in-the-wild set with original platform JPEG
+      compression preserved. Evaluation protocol trains on one platform and
+      tests on the others.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "Chameleon"
+    task: "detection"
+    homepage: "https://github.com/shilinyan99/AIDE"
+    download: null
+    access: "gated"
+    license: "Chameleon is only used for academic research. Commercial use in any form is prohibited."
+    commercial_ok: false
+    approx_size_gb: null
+    images: "11,000 AI-generated + about 15,000 real (~26,000 total), mostly above 720p up to 4K"
+    generators: "unlisted mainstream AI creation communities (ArtStation, Civitai, Liblib) plus commercial generators"
+    masks: false
+    citation: "arXiv:2406.19435 (ICLR 2025)"
+    notes: >-
+      Human-fooling hard test set: "almost all models classify AI-generated
+      images as real ones" on this set per the paper. Gated behind an
+      email request to the authors (contact address in the AIDE repository README).
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "GenImage"
+    task: "detection"
+    homepage: "https://github.com/GenImage-Dataset/GenImage"
+    download: "https://drive.google.com/drive/folders/1jGt10bwTbhEZuGXLyvrCuxOI0cBqQ1FS"
+    access: "open"
+    license: "CC BY-NC-SA 4.0"
+    commercial_ok: false
+    approx_size_gb: 500.0
+    images: "over 1M real (ImageNet) + over 1M fake image pairs across 8 generators"
+    generators: "SD1.4, SD1.5, Midjourney, ADM, GLIDE, Wukong, VQDM, BigGAN"
+    masks: false
+    citation: "arXiv:2306.08571 (NeurIPS 2023)"
+    notes: >-
+      Do not download the raw ~500 GB set for training as-is: detectors
+      trained on it can learn compression and image-size biases rather
+      than AI-ness. Prefer the UnbiasedGenImage filtering recipe (separate
+      registry entry) over the raw set.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "UnbiasedGenImage"
+    task: "detection"
+    homepage: "https://www.unbiased-genimage.org/"
+    download: "https://github.com/gendetection/UnbiasedGenImage"
+    access: "open"
+    license: "not stated (no license file in the filtering-code repo)"
+    commercial_ok: null
+    approx_size_gb: null
+    images: "filtered, JPEG-QF-aligned subset of GenImage selected via metadata.csv (e.g. 450-550px width/height, aligned compression_rate)"
+    generators: "same 8 as GenImage"
+    masks: false
+    citation: "arXiv:2403.17608"
+    notes: >-
+      Not a separately-hosted smaller download: the repo provides a
+      metadata.csv plus jpeg_augment.py to filter the full GenImage
+      download (Google Drive, or Harvard Dataverse ~500GB) by JPEG quality
+      factor, size, or content class at training time. Removes the
+      compression/resolution shortcut that lets a detector learn format
+      bias instead of generative artifacts. No license file is published
+      for the filtering code or the resulting subset.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "ForenSynths"
+    task: "detection"
+    homepage: "https://github.com/PeterWang512/CNNDetection"
+    download: "https://drive.google.com/file/d/1iVNBV0glknyTYGA9bCxT_d0CVTOgGcKh/view"
+    access: "open"
+    license: "CC BY-NC-SA 4.0 (LICENSE.txt)"
+    commercial_ok: false
+    approx_size_gb: null
+    images: "train: ProGAN over 20 LSUN classes; test: 13 CNN synthesis algorithms (ProGAN, StyleGAN, StyleGAN2, CycleGAN, BigGAN, StarGAN, GauGAN, CRN, IMLE, SITD, SAN, Deepfake, whichfaceisreal.com)"
+    generators: "GANs only (ProGAN train; 13 CNN algorithms test)"
+    masks: false
+    citation: "Wang et al., CVPR 2020 (CNNDetection)"
+    notes: >-
+      Also known as CNNDetection. GAN-only; obsolete as a sole training set
+      for diffusion-era detection. The repo's July 2024 update notes the
+      dataset files are being migrated to Hugging Face; total size was not
+      stated by the maintainers.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "DiffusionForensics"
+    task: "detection"
+    homepage: "https://github.com/ZhendongWang6/DIRE"
+    download: "https://pan.baidu.com/s/1Rdzc7l8P0RrJft0cW0a4Gg"
+    access: "open"
+    license: "not stated (no license file in the repo, archived July 2025)"
+    commercial_ok: null
+    approx_size_gb: null
+    images: "not stated exactly; real/generated triples spanning LSUN-Bedroom, ImageNet, and CelebA-HQ across 8 diffusion models"
+    generators: "LDM/ADM/SD family (8 diffusion models total per the paper)"
+    masks: false
+    citation: "arXiv:2303.09295 (DIRE, ICCV 2023)"
+    notes: >-
+      Also known as the DIRE dataset. Download is password-protected
+      (BaiduDrive/RecDrive, password "dire"); the repository was archived
+      (read-only) in July 2025 and no license file is published. A
+      real/fake source mismatch across the three sub-datasets is a known
+      pitfall.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "COCO"
+    task: "real-source"
+    homepage: "https://cocodataset.org/"
+    download: "http://images.cocodataset.org/zips/train2017.zip"
+    access: "open"
+    license: "Annotations: CC BY 4.0. Images: subject to Flickr's Terms of Use; per-image licenses vary (CC BY/BY-NC/BY-NC-ND/BY-SA/BY-ND 2.0, public domain, etc.) and are not uniformly commercial-safe."
+    commercial_ok: null
+    approx_size_gb: 18.0
+    images: "train2017: 118,287 images"
+    generators: null
+    masks: false
+    citation: "arXiv:1405.0312 (Lin et al., ECCV 2014)"
+    notes: >-
+      Standard real-image source paired against generated sets (GenImage,
+      TGIF, CocoGlide, tampCOCO, AutoSplice, and DEAL-300K all derive from
+      COCO). COCO is JPEG-compressed, which is a real=JPEG/fake=PNG bias
+      risk if a paired fake set is saved as PNG.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "RAISE"
+    task: "real-source"
+    homepage: "http://loki.disi.unitn.it/RAISE/"
+    download: "http://loki.disi.unitn.it/RAISE/download.html"
+    access: "open"
+    license: "Non-commercial research and educational use only; accompanying metadata is CC0 1.0"
+    commercial_ok: false
+    approx_size_gb: null
+    images: "8,156 high-resolution RAW images total; named subsets RAISE-1k/2k/4k/6k"
+    generators: null
+    masks: false
+    citation: "Dang-Nguyen et al., ACM MMSys 2015"
+    notes: >-
+      Uncompressed RAW real-image source used as reals for Synthbuster and
+      as the tampering substrate for tampCOCO's compRAISE variant.
+      Uncompressed reals vs compressed fakes is a format-bias risk if
+      paired naively.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "CASIA v2.0"
+    task: "localization"
+    homepage: "https://github.com/SunnyHaze/CASIA2.0-Corrected-Groundtruth"
+    download: "https://drive.google.com/file/d/1JN93ts7VxJ4bbJL9TlE9uxM3ZeYuCN9M/view"
+    access: "open"
+    license: "research (no license file published; original CASIA distribution terms are undocumented)"
+    commercial_ok: false
+    approx_size_gb: null
+    images: "7,491 authentic / 5,123 tampered (3,295 copy-move + 1,828 spliced after reclassification)"
+    generators: null
+    masks: true
+    citation: "Dong et al., ChinaSIP 2013 (original); Pham et al., Symmetry 2019 (corrected ground truth)"
+    notes: >-
+      The original host (forensics.idealtest.org) is confirmed offline as
+      of 2026-09-09; community mirrors (SunnyHaze/CASIA2.0-Corrected-Groundtruth,
+      namtpham/casia2groundtruth) are now the practical source. Ground
+      truth in the original release is noisy: use the corrected masks.
+      Format shortcut: about 60% of tampered images are TIFF while
+      authentic images are JPEG/BMP; metadata-only features reportedly
+      reach about 0.92 AUC on this confound alone (arXiv:2607.06615).
+      Re-encode both classes identically before training.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "CASIA v1.0"
+    task: "localization"
+    homepage: "https://github.com/namtpham/casia1groundtruth"
+    download: "https://github.com/namtpham/casia1groundtruth"
+    access: "open"
+    license: "research (no license file published; original host offline)"
+    commercial_ok: false
+    approx_size_gb: 0.09
+    images: "800 authentic / 921 tampered"
+    generators: null
+    masks: true
+    citation: "Dong et al., ChinaSIP 2013"
+    notes: >-
+      Standard classic-manipulation test set (~90 MB total per the mirror
+      repo). Shares source content with CASIA v2: training on v2 and
+      testing on v1 as "cross-dataset" is invalid. The original host
+      (forensics.idealtest.org) is confirmed offline as of 2026-09-09.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "Columbia"
+    task: "localization"
+    homepage: "https://www.ee.columbia.edu/ln/dvmm/downloads/authsplcuncmp/"
+    download: "https://www.ee.columbia.edu/ln/dvmm/downloads/authsplcuncmp/dlform.html"
+    access: "form"
+    license: "research (request-form terms; no separate license text published)"
+    commercial_ok: false
+    approx_size_gb: 0.37
+    images: "183 authentic / 180 tampered"
+    generators: null
+    masks: true
+    citation: null
+    notes: >-
+      Splicing only, uncompressed TIFF/BMP with full EXIF retained.
+      Trivially easy and near-saturated: keep only as a sanity check, not
+      a headline number.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "COVERAGE"
+    task: "localization"
+    homepage: "https://github.com/wenbihan/coverage"
+    download: null
+    access: "open"
+    license: "All data is subject to copyright and may only be used for non-commercial research (per repo README)."
+    commercial_ok: false
+    approx_size_gb: null
+    images: "100 authentic/tampered pairs"
+    generators: null
+    masks: true
+    citation: "Wen et al., ICIP 2016"
+    notes: >-
+      Copy-move with similar-but-genuine distractors, designed to defeat
+      naive similarity detectors. Tiny and effectively solved; inflates
+      averages if reported alone. Distributed via OneDrive/Baidu links in
+      the repo README, not a direct URL.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "IMD2020"
+    task: "localization"
+    homepage: "https://staff.utia.cas.cz/novozada/db/"
+    download: "https://staff.utia.cas.cz/novozada/db/IMD2020.zip"
+    access: "open"
+    license: "not stated (no license file published; citation of the paper is requested)"
+    commercial_ok: null
+    approx_size_gb: null
+    images: "35,000 real + 35,000 inpainting-manipulated (70,000, large-scale set); 2,010 real-life manipulated images with masks; plus 2,759 images from 32 cameras for PRNU/sensor-noise analysis"
+    generators: "contextual-attention inpainting (Yu et al. 2018) for the synthetic half; unknown/manual editing for the real-life set"
+    masks: true
+    citation: "doi:10.1109/WACVW50321.2020.9096940 (Novozamsky et al., WACVW 2020)"
+    notes: >-
+      The 2,010 real-life manipulated images (not the synthetic half) are
+      the valuable part: genuine in-the-wild manipulations with masks. No
+      license file is published; citation of the paper is requested.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "DEFACTO"
+    task: "localization"
+    homepage: "https://defactodataset.github.io/"
+    download: null
+    access: "form"
+    license: "Follows MSCOCO / IMDB source-image terms; the DEFACTO Consortium does not own copyright of the underlying images."
+    commercial_ok: null
+    approx_size_gb: null
+    images: "copy-move ~19,000; splicing ~105,000; object-removal ~25,000; face-morphing ~40,000 (~189,000 total)"
+    generators: null
+    masks: true
+    citation: "Mahfoudi et al., EUSIPCO 2019"
+    notes: >-
+      Splice, copy-move, removal, and face-morph manipulations,
+      auto-generated so composites are unrealistic. MVSS-Net uses a
+      DEFACTO-84k train / DEFACTO-12k test split. Access via Kaggle
+      request form.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "CocoGlide"
+    task: "localization"
+    homepage: "https://github.com/grip-unina/TruFor"
+    download: "https://huggingface.co/datasets/nebula/CocoGlide"
+    access: "open"
+    license: "TruFor repo license restricts use to informational/nonprofit purposes (Image Processing Research Group, University Federico II of Naples); underlying images derive from COCO."
+    commercial_ok: false
+    approx_size_gb: 0.1
+    images: "512 tampered, paired with pristine originals (~1,020 rows total on the Hugging Face mirror)"
+    generators: "GLIDE diffusion inpainting"
+    masks: true
+    citation: "arXiv:2212.10957 (TruFor, CVPR 2023) -- CocoGlide subset"
+    notes: >-
+      Small, free, the standard probe for whether a classic localizer
+      survives diffusion inpainting. TruFor (github.com/grip-unina/TruFor)
+      is CocoGlide's parent repository, not a separate registry entry.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "AutoSplice"
+    task: "localization"
+    homepage: "https://github.com/shanface33/AutoSplice_Dataset"
+    download: "https://drive.google.com/drive/folders/1QpBm4528ng877ytdBiRSnrH-rsrCeoIA"
+    access: "open"
+    license: "Released only for academic research; noncommercial use by researchers at educational institutes (per repo README)."
+    commercial_ok: false
+    approx_size_gb: null
+    images: "3,621 manipulated + 2,273 authentic (5,894 total)"
+    generators: "DALL-E 2 text-prompt local edits"
+    masks: true
+    citation: "arXiv:2304.06870 (CVPR 2023 Workshop on Media Forensics)"
+    notes: >-
+      Ships three JPEG-quality variants (100/90/75) with masks and
+      captions; useful for robustness curves. Authentic images are drawn
+      from the Visual News dataset.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "tampCOCO"
+    task: "localization"
+    homepage: "https://github.com/mjkwon2021/CAT-Net"
+    download: "https://www.kaggle.com/datasets/qsii24/tampcoco"
+    access: "open"
+    license: "CC-BY 4.0 (relaxed from research-only on 2026-08-05); commercial use is permitted with attribution, but the maintainer notes users remain responsible for the copyrights of the original source images."
+    commercial_ok: true
+    approx_size_gb: null
+    images: "about 800,000 (cm_COCO, sp_COCO, bcm_COCO, bcmc_COCO variants)"
+    generators: "copy-move + splice variants (cm/sp/bcm/bcmc)"
+    masks: true
+    citation: "arXiv:2108.12947 (CAT-Net, IJCV 2022)"
+    notes: >-
+      CAT-Net's training set; still large even filtered, subsample heavily
+      if used at all. The license was relaxed from research-only to CC-BY
+      4.0 on 2026-08-05 -- re-check `commercial_ok` if this entry predates
+      that date for your copy of this file.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "TGIF"
+    task: "localization"
+    homepage: "https://github.com/IDLabMedia/tgif-dataset"
+    download: "https://zenodo.org/records/14050608"
+    access: "open"
+    license: "CC BY-SA 4.0 (COCO-derived)"
+    commercial_ok: true
+    approx_size_gb: null
+    images: "3,124 authentic (2,440/341/343 train-val-test) -> 74,976 fakes (58,560/8,184/8,232 train-val-test)"
+    generators: "SD2, SDXL, Adobe Firefly inpainting (composited and fully-regenerated variants)"
+    masks: true
+    citation: "arXiv:2407.11566 (IEEE WIFS 2024)"
+    notes: >-
+      A generative-edit dataset with masks and train/val/test splits. The
+      CC BY-SA ShareAlike clause means any derived image set built from it
+      must carry the same license if redistributed.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "TGIF2"
+    task: "localization"
+    homepage: "https://github.com/IDLabMedia/tgif-dataset"
+    download: "https://github.com/IDLabMedia/tgif-dataset"
+    access: "open"
+    license: "CC BY-SA 4.0"
+    commercial_ok: true
+    approx_size_gb: null
+    images: "+196,812 fakes added (153,720/21,483/21,609 train-val-test); 271,788 combined with TGIF"
+    generators: "adds FLUX.1 schnell/dev/fill-dev plus random non-semantic masks"
+    masks: true
+    citation: "arXiv:2603.28613"
+    notes: >-
+      2026 extension of TGIF; the random-mask split removes the semantic
+      shortcut that lets a model learn "plausible object location" instead
+      of an actual inpainting artifact.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "MIML"
+    task: "localization"
+    homepage: "https://github.com/qcf-568/MIML"
+    download: null
+    access: "gated"
+    license: "Non-commercial use only, licensed to full-time university/research-institute staff via a signed application form."
+    commercial_ok: false
+    approx_size_gb: null
+    images: "123,150 (v1) / 246,212 (v2, MIMLv2)"
+    generators: "manually forged (web-collected), auto pixel-annotated (CAAA + QES)"
+    masks: true
+    citation: "Qu et al., CVPR 2024"
+    notes: "Closest available set to real Photoshop work at scale. Gated behind a signed institutional application form."
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "DEAL-300K"
+    task: "localization"
+    homepage: "https://github.com/ymhzyj/DEAL-300K"
+    download: "https://huggingface.co/datasets/FlyHorseJ/DEAL-300K"
+    access: "open"
+    license: "MIT (repo LICENSE file); edited and source images ultimately derive from MS COCO photos under mixed Flickr licenses, which the MIT grant does not clear."
+    commercial_ok: null
+    approx_size_gb: null
+    images: "340,468 total: 119,371 source + 221,097 edited, with pixel-level masks"
+    generators: "InstructPix2Pix, with editing instructions produced by a fine-tuned Qwen-VL model"
+    masks: true
+    citation: "arXiv:2511.23377"
+    notes: >-
+      The only large set targeting instruction-based full-image editors,
+      with active-learning change-detection masks. Several release items
+      (pretrained checkpoints, full training code) were still pending as
+      of the dataset's publication.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "ImageNet"
+    task: "real-source"
+    homepage: "https://www.image-net.org/"
+    download: "https://image-net.org/download.php"
+    access: "form"
+    license: "Non-commercial research and educational use only, per the ImageNet access agreement."
+    commercial_ok: false
+    approx_size_gb: null
+    images: "ILSVRC-2012 subset: 1.28M training images across 1,000 classes (the full ImageNet database is substantially larger)"
+    generators: null
+    masks: false
+    citation: "Deng et al., CVPR 2009 (ImageNet); Russakovsky et al., IJCV 2015 (ILSVRC)"
+    notes: >-
+      Common real-image source for AI-generated-image benchmarks (e.g.
+      GenImage, Community Forensics). Access requires registering and
+      agreeing to the ImageNet terms, which restrict commercial use and
+      hold the researcher (and their employer, if for-profit) responsible
+      for how the images are used.
+    verified: true
+    verified_on: "2026-09-09"
+
+  - name: "LAION-400M/5B"
+    task: "real-source"
+    homepage: "https://laion.ai/blog/relaion-5b/"
+    download: "https://huggingface.co/datasets/laion/relaion2B-en-research-safe"
+    access: "gated"
+    license: "Metadata (URLs and captions) under Apache-2.0 / CC BY 4.0; LAION distributes only links and captions, never the images themselves, so the underlying image copyrights are third-party and unverified."
+    commercial_ok: null
+    approx_size_gb: null
+    images: "Re-LAION-5B-research: 5,526,641,167 URL+caption pairs; LAION-400M was the earlier 400M-pair release (also reissued as Re-LAION400M)"
+    generators: null
+    masks: false
+    citation: "arXiv:2210.08402 (LAION-5B, NeurIPS 2022); arXiv:2111.02114 (LAION-400M)"
+    notes: >-
+      LAION-5B and LAION-400M were withdrawn from public distribution in
+      December 2023 after a Stanford Internet Observatory report found
+      suspected CSAM links in the URL list; both were re-released as
+      Re-LAION in August 2024 with those links removed (Re-LAION-5B
+      removes about 1.1% of the original samples). These are URL lists
+      with mixed, unverified third-party image licenses, not a hosted
+      image set. Access to the Hugging Face releases is gated behind an
+      affiliation/consent step as of 2026-09-09.
+    verified: true
+    verified_on: "2026-09-09"

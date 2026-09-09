@@ -10,6 +10,7 @@ import numpy as np
 import typer
 from PIL import Image
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 
@@ -18,10 +19,27 @@ from imgforensics import __version__
 from imgforensics.core import registry
 from imgforensics.core.image import ForensicImage
 from imgforensics.core.types import DetectionResult
+from imgforensics.data import (
+    Manifest,
+    audit_manifest,
+    build_manifest,
+    get_dataset,
+    label_from_parent_folder,
+    load_registry,
+)
 from imgforensics.utils.image_io import image_hash
 
 app = typer.Typer(help="Detect AI-generated images, AI-inpainted regions, and manipulations.")
+datasets_app = typer.Typer(help="Browse the external dataset registry.")
+manifest_app = typer.Typer(help="Build dataset manifests.")
+app.add_typer(datasets_app, name="datasets")
+app.add_typer(manifest_app, name="manifest")
 console = Console()
+# A wider, fixed-width console for the dataset-registry tables: names and
+# license strings are long enough that the default (terminal-detected, often
+# 80-column) width truncates them illegibly, especially when stdout is not a
+# real terminal (e.g. under CliRunner in tests, or piped output).
+_registry_console = Console(width=160)
 
 _DETAIL_STRING_LIMIT = 80
 
@@ -177,6 +195,108 @@ def analyze(
 def version() -> None:
     """Print the installed imgforensics version."""
     console.print(__version__)
+
+
+@app.command()
+def audit(
+    manifest_path: Annotated[
+        Path,
+        typer.Argument(exists=True, dir_okay=False, readable=True, help="Manifest .jsonl file."),
+    ],
+    strict: Annotated[
+        bool,
+        typer.Option("--strict", help="Exit with code 1 if the audit finds any problems."),
+    ] = False,
+) -> None:
+    """Audit a manifest's real/fake halves for format, resolution, quality, and duplicate bias."""
+    manifest = Manifest.load(manifest_path)
+    report = audit_manifest(manifest, strict=False)
+    console.print(Markdown(report.to_markdown()))
+    if strict and not report.ok:
+        raise typer.Exit(code=1)
+
+
+@datasets_app.command("list")
+def datasets_list() -> None:
+    """Print every registered dataset as a table."""
+    table = Table(title="Dataset registry")
+    table.add_column("name", no_wrap=True)
+    table.add_column("task")
+    table.add_column("access")
+    table.add_column("license")
+    table.add_column("commercial_ok")
+    table.add_column("approx_gb", justify="right")
+    table.add_column("verified")
+    for info in load_registry():
+        table.add_row(
+            info.name,
+            info.task,
+            info.access,
+            _truncate(info.license, 40),
+            "-" if info.commercial_ok is None else str(info.commercial_ok),
+            "-" if info.approx_size_gb is None else f"{info.approx_size_gb:g}",
+            str(info.verified),
+        )
+    _registry_console.print(table)
+
+
+@datasets_app.command("show")
+def datasets_show(
+    name: Annotated[str, typer.Argument(help="Exact dataset name, as printed by 'datasets list'.")],
+) -> None:
+    """Print every field of one dataset registry entry."""
+    try:
+        info = get_dataset(name)
+    except KeyError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    table = Table(show_header=False, box=None, title=info.name, title_justify="left")
+    table.add_column("field", style="bold")
+    table.add_column("value")
+    for field_name, value in info.model_dump().items():
+        table.add_row(field_name, "-" if value is None else str(value))
+    _registry_console.print(table)
+
+
+@manifest_app.command("build")
+def manifest_build(
+    root: Annotated[
+        Path,
+        typer.Argument(exists=True, file_okay=False, readable=True, help="Dataset root directory."),
+    ],
+    dataset: Annotated[
+        str, typer.Option("--dataset", help="Dataset name recorded as each entry's source.")
+    ],
+    out: Annotated[Path, typer.Option("--out", help="Path to write the manifest (.jsonl) to.")],
+    license_: Annotated[
+        str | None,
+        typer.Option("--license", help="License string recorded in the manifest metadata."),
+    ] = None,
+    commercial_ok: Annotated[
+        bool | None,
+        typer.Option(
+            "--commercial-ok/--no-commercial-ok",
+            help="Whether this dataset slice may be used commercially (default: unset/unknown).",
+        ),
+    ] = None,
+) -> None:
+    """Build a manifest from ROOT, labeling each image by its parent folder name."""
+    manifest, skipped = build_manifest(
+        root,
+        dataset=dataset,
+        label_of=label_from_parent_folder,
+        license=license_,
+        commercial_ok=commercial_ok,
+        progress=False,
+    )
+    manifest.save(out)
+    console.print(f"Wrote {len(manifest.entries)} entries to {out}")
+    if skipped:
+        console.print(f"[yellow]{len(skipped)} file(s) skipped (unreadable):[/yellow]")
+        for line in skipped[:20]:
+            console.print(f"  {line}")
+        if len(skipped) > 20:
+            console.print(f"  ... and {len(skipped) - 20} more")
 
 
 if __name__ == "__main__":

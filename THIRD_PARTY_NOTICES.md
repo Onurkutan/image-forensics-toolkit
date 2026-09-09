@@ -20,6 +20,7 @@ redistributed by this repository (see `docs/ROADMAP.md`, section 7).
 | pydantic | MIT | yes |
 | piexif | MIT | yes |
 | PyWavelets | MIT | yes |
+| PyYAML | MIT | yes |
 
 ## Optional runtime dependencies
 

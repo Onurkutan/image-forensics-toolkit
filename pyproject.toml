@@ -34,6 +34,7 @@ dependencies = [
     "pydantic>=2.5",
     "piexif>=1.1.3",
     "PyWavelets>=1.4",
+    "PyYAML>=6",
 ]
 
 [project.optional-dependencies]
@@ -69,6 +70,9 @@ imgforensics = "imgforensics.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+imgforensics = ["data/*.yaml", "py.typed"]
 
 [tool.ruff]
 line-length = 100

@@ -74,6 +74,21 @@ image-forensics-toolkit/
 └── docs/
 ```
 
+## Data and evaluation
+
+A dataset manifest is a JSON Lines file of labeled images (path, label,
+source, generator, split, mask path, sha256, resolution, format, JPEG
+quality) plus a `*.meta.json` sidecar (dataset name, license,
+`commercial_ok`). Build one from a folder tree with `real`/`fake`
+subfolders via `imgforensics manifest build ROOT --dataset NAME --out
+manifest.jsonl`, browse the external dataset registry with `imgforensics
+datasets list` / `datasets show NAME`, and check a manifest's real/fake
+halves for format, resolution, JPEG-quality, and duplicate-image bias with
+`imgforensics audit manifest.jsonl [--strict]`. See
+[`imgforensics.eval.metrics`](src/imgforensics/eval/metrics.py) for the
+image-level (AUC, AP, accuracy, ECE, ...) and pixel-level (F1, best-F1, AP,
+IoU) metrics used to score detectors and localizers.
+
 ## Roadmap
 
 See [docs/ROADMAP.md](docs/ROADMAP.md).
