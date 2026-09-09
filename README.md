@@ -5,7 +5,9 @@
 A toolkit to detect AI-generated images, AI-inpainted regions, and classic manipulations
 (splicing/copy-move), producing an image-level score plus an optional heatmap.
 
-Status: early development (v0.1.0), no detectors implemented yet.
+Status: early development (v0.1.0). Two classical signals are implemented so
+far: `metadata` (EXIF/XMP/editor/AI-generator markers, thumbnail consistency,
+JPEG quality estimate) and `ela` (Error Level Analysis with heatmap).
 
 ## Planned architecture
 
@@ -24,9 +26,10 @@ Status: early development (v0.1.0), no detectors implemented yet.
 git clone https://github.com/Onurkutan/image-forensics-toolkit.git
 cd image-forensics-toolkit
 python -m venv .venv
-# Windows: .venv\Scriptsctivate      macOS/Linux: source .venv/bin/activate
+# Windows: .venv\Scripts\activate      macOS/Linux: source .venv/bin/activate
 pip install -e ".[dev]"
 imgforensics analyze path/to/image.jpg
+imgforensics analyze image.jpg --json --save-heatmaps out/
 pytest
 ```
 
@@ -61,5 +64,6 @@ The code in this repository is released under the MIT license, see [LICENSE](LIC
 
 This is a personal, non-commercial research project. Third-party models, weights and
 datasets are not included in the repository; they are downloaded from their original sources
-and keep their own licenses, some of which permit research use only. The full list is kept in
-`THIRD_PARTY_NOTICES.md` once external components are added.
+and keep their own licenses, some of which permit research use only. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the current library list; models and
+datasets are added there as they are integrated.
