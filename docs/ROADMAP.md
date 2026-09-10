@@ -154,6 +154,13 @@ measured the same way from its first training run.
   model. Also found: the crop-never-resize policy breaks below the crop size (AUC 0.57 at
   quarter scale), and the classical signals are the benchmark bottleneck (about 270 ms per
   512 px image on one core) and need parallel workers.
+- **Result of experiment 02 (2026-09-10):** same model, data changed (COCO and WildRF-train
+  reals added, augmented-only training views, mixed-source calibration). COCO false-positive
+  rate 99.9% to 2.7%, WildRF test AUC 0.459 to 0.980 (balanced accuracy 0.916 at 0.5),
+  same-family val AUC 1.000, CocoGlide local edits AUC 0.644 (a whole-image head does not
+  see small inpainted regions; that is Phase 4's job). WildRF is held-out images of a
+  distribution seen in training; the genuine cross-dataset tests (Synthbuster, ITW-SM) are
+  pending. See [`docs/benchmarks/02_experiment_summary.md`](benchmarks/02_experiment_summary.md).
 
 ### Phase 4 — Manipulation localization
 

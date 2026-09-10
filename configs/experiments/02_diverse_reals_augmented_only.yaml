@@ -1,0 +1,48 @@
+# Experiment 02: diverse real sources, augmented-only training views
+# (see docs/benchmarks/01_experiment_summary.md, "What this changes").
+#
+#   imgforensics train head --config configs/experiments/02_diverse_reals_augmented_only.yaml
+#
+# Differences from configs/head_dinov2.yaml:
+#   - train manifest merges Community Forensics train (generator-disjoint),
+#     4,000 COCO val2017 photographs and the WildRF train split, so "real" is
+#     no longer three curated sources;
+#   - val manifest merges Community Forensics val with the WildRF val split,
+#     so calibration is fitted on scores that are not perfectly separable;
+#   - train_views: augmented_only drops the clean view of every training
+#     image, forcing both classes through the same random re-encoding.
+# COCO's held-out 1,000 and WildRF's test split are never seen in training.
+
+train_manifest: data/manifests/train_02.jsonl
+val_manifest: data/manifests/val_02.jsonl
+cache_dir: data/features
+
+backbone: dinov2_vitb14
+
+crop:
+  size: 224
+  mode: grid
+  max_crops: 4
+  seed: 0
+
+augment: configs/augment_default.yaml
+views: 2
+train_views: augmented_only
+
+head:
+  proj_dim: 256
+  hidden_dim: 256
+  dropout: 0.2
+  layer_weighting: softmax
+
+epochs: 20
+batch_size: 256
+lr: 0.001
+weight_decay: 0.01
+label_smoothing: 0.05
+balance_classes: true
+early_stopping_patience: 5
+seed: 0
+
+out_dir: weights/dinov2_head_02
+device: auto
