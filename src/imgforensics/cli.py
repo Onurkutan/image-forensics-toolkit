@@ -44,6 +44,7 @@ from imgforensics.eval.preprocess import AugmentationConfig
 from imgforensics.eval.records import ScoreRecord
 from imgforensics.eval.robustness import RobustnessSuite
 from imgforensics.eval.runner import BenchmarkConfig, BenchmarkResult, run_benchmark
+from imgforensics.fusion.explain_report import ReportPaths, build_report
 from imgforensics.fusion.report import explain
 from imgforensics.fusion.stacking import Fuser, fit_fuser
 from imgforensics.localization import (  # also registers the iml_vit localizer
@@ -53,6 +54,7 @@ from imgforensics.localization import (  # also registers the iml_vit localizer
 )
 from imgforensics.signals import SIGNAL_NAMES  # also registers all seven signal detectors
 from imgforensics.utils.image_io import image_hash
+from imgforensics.utils.jsonsafe import to_jsonable
 
 app = typer.Typer(help="Detect AI-generated images, AI-inpainted regions, and manipulations.")
 datasets_app = typer.Typer(help="Browse the external dataset registry.")
@@ -150,21 +152,6 @@ def _print_fusion_panel(fusion: dict[str, Any]) -> None:
     console.print(panel)
 
 
-def _jsonable(value: Any) -> Any:
-    """Recursively convert numpy scalars/arrays and bytes into JSON-serialisable values."""
-    if isinstance(value, dict):
-        return {key: _jsonable(item) for key, item in value.items()}
-    if isinstance(value, list | tuple):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, np.ndarray):
-        return _jsonable(value.tolist())
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "replace")
-    return value
-
-
 def _truncate(text: str, limit: int = _DETAIL_STRING_LIMIT) -> str:
     if len(text) > limit:
         return text[: limit - 1] + "\N{HORIZONTAL ELLIPSIS}"
@@ -228,6 +215,17 @@ def analyze(
             ),
         ),
     ] = None,
+    report_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--report-dir",
+            help=(
+                "Directory to build an explanation report in: report.json, report.md, and a "
+                "heatmap/overlay PNG pair per detector with a heatmap. Works with or without "
+                "--fuser."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Analyze a single image and print per-detector results."""
     forensic_image = ForensicImage.from_path(path)
@@ -257,6 +255,16 @@ def analyze(
 
     fusion_payload = _fusion_payload(loaded_fuser, results) if loaded_fuser is not None else None
 
+    report_paths: ReportPaths | None = None
+    if report_dir is not None:
+        report_paths = build_report(
+            forensic_image,
+            results,
+            fuser=loaded_fuser,
+            out_dir=report_dir,
+            source_name=path.name,
+        )
+
     if json_output:
         document = {
             "file": str(path),
@@ -268,7 +276,7 @@ def analyze(
                     "score": result.score,
                     "label": result.label,
                     "elapsed_ms": result.elapsed_ms,
-                    "details": _jsonable(result.details),
+                    "details": to_jsonable(result.details),
                     "heatmap": (
                         str(heatmap_paths[result.detector])
                         if heatmap_paths[result.detector] is not None
@@ -279,7 +287,9 @@ def analyze(
             ],
         }
         if fusion_payload is not None:
-            document["fusion"] = _jsonable(fusion_payload)
+            document["fusion"] = to_jsonable(fusion_payload)
+        if report_paths is not None:
+            document["report_dir"] = str(report_paths.out_dir)
         typer.echo(json.dumps(document, indent=2))
         return
 
@@ -303,7 +313,7 @@ def analyze(
         for key, value in result.details.items():
             if value is None:
                 continue
-            details_table.add_row(key, escape(_truncate(str(_jsonable(value)))))
+            details_table.add_row(key, escape(_truncate(str(to_jsonable(value)))))
         heatmap_path = heatmap_paths[result.detector]
         if heatmap_path is not None:
             details_table.add_row("heatmap", str(heatmap_path))
@@ -319,6 +329,9 @@ def analyze(
 
     if fusion_payload is not None:
         _print_fusion_panel(fusion_payload)
+
+    if report_paths is not None:
+        console.print(f"Report written to {report_paths.out_dir}")
 
 
 @app.command()
@@ -757,6 +770,17 @@ def features_extract(
     views: Annotated[
         int,
         typer.Option("--views", help="Views per image; view 0 is un-augmented, 1..K-1 augmented."),
+    ] = 1,
+    workers: Annotated[
+        int,
+        typer.Option(
+            "--workers",
+            help=(
+                "Decode, EXIF-transpose, window-cut and augment images across this many "
+                "worker processes; the backbone forward pass always stays in one process. "
+                "1 (the default) decodes serially, as before this option existed."
+            ),
+        ),
     ] = 1,
 ) -> None:
     """Extract frozen-backbone features for every manifest image, caching them on disk."""

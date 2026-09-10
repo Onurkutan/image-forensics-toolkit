@@ -178,6 +178,11 @@ use and cached there; set `IMGFORENSICS_WEIGHTS_DIR` to keep them in the
 project's gitignored `weights/` directory instead. See
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for each model's license.
 
+Extraction can run image decoding, window cutting and augmentation in worker processes with
+`features extract --workers N`; augmented views are computed on a 2x crop window aligned to the
+image's 16-pixel grid rather than on the whole image, which keeps the JPEG block alignment of
+whole-image augmentation while avoiding full-resolution re-encoding of very large photographs.
+
 ### Training a head
 
 The backbone stays frozen; the only thing that trains is a ~1.06 M-parameter
@@ -362,6 +367,11 @@ below low / fake above high / uncertain in between" band is fitted on a
 held-out split so the fuser can say "not sure" instead of guessing.
 `imgforensics fusion info fuser.json` prints its weights, band and metrics
 (train/held-out AUC, ECE before/after calibration, abstain rate).
+
+`imgforensics analyze IMAGE --report-dir DIR` writes a self-contained report folder: `report.json`
+with every detector's score, label and details plus the fused verdict when a fuser is configured,
+`<detector>_heatmap.png` and `<detector>_overlay.png` for every detector that produced a heatmap,
+and `report.md` with one plain-language card per detector, the fused verdict first.
 
 ## Roadmap
 

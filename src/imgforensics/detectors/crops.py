@@ -19,8 +19,12 @@ The three modes trade coverage against cost:
 
 :func:`crops_for` cuts the crops; :func:`crop_boxes` returns where those same
 crops sit in the source image, which is what turns a per-crop score into a
-heatmap. Both read their placements from one private helper, so a box can
-never disagree with the crop it describes.
+heatmap; :func:`crop_windows` returns a larger, 16px-grid-aligned window
+around each crop, which is what lets training-time augmentation act on a
+crop's own neighbourhood instead of the whole image (see
+:mod:`imgforensics.detectors.features`). All three read their placements
+from one private helper, so a box or window can never disagree with the crop
+it describes.
 
 :func:`to_array` produces the normalized ``(N, 3, H, W)`` batch a backbone
 expects; :func:`to_tensor` is the same thing wrapped in a
@@ -263,6 +267,100 @@ def crop_boxes(
             )
         )
     return boxes
+
+
+#: Windows snap to this many pixels, matching the JPEG/WEBP 8x8 block grid
+#: (16 is two blocks, giving a little slack either side of the block the
+#: crop's own top-left may land in).
+_WINDOW_ALIGN = 16
+
+
+@dataclass(frozen=True)
+class CropWindow:
+    """A window around one crop, sized for training-time augmentation to act on locally.
+
+    See :func:`crop_windows`. ``top``/``left``/``height``/``width`` are in
+    the same (padded) array coordinates :func:`crops_for` itself cuts crops
+    from -- which equal the source image's own coordinates whenever no
+    padding was needed, the common case a window is used for.
+    ``crop_top``/``crop_left`` say where the original crop sits *within*
+    this window, so
+    ``window_array[crop_top : crop_top + size, crop_left : crop_left + size]``
+    (where ``window_array`` is the array region this window describes) is
+    exactly the pixels :func:`crops_for` would have cut for it.
+    """
+
+    top: int
+    left: int
+    height: int
+    width: int
+    crop_top: int
+    crop_left: int
+
+
+def _window_span(pos: int, crop_size: int, array_size: int) -> tuple[int, int]:
+    """Top-left and length of a window covering one axis of one crop.
+
+    The window is ``2 * crop_size`` long, centered on the crop, with its
+    start snapped down to the nearest multiple of :data:`_WINDOW_ALIGN` --
+    so the window's own top-left lands on the same 8x8 JPEG block grid the
+    source image does. Two things can move the window off that exact
+    snapped position, and both only ever shrink or shift it *inward*, never
+    pad it:
+
+    - The array itself can be smaller than the ideal window (a small,
+      reflection-padded image), in which case the window shrinks to the
+      array's own size on that axis.
+    - The snapped window can spill past the array's far edge, in which case
+      it is shifted back inside -- this is the one case where the returned
+      start may not itself be a multiple of :data:`_WINDOW_ALIGN`, because a
+      crop placed right at the edge leaves exactly one valid window position
+      (its far edge must land exactly on the array's edge to still cover the
+      crop), and that position need not fall on the grid.
+
+    In every case the window fully contains ``[pos, pos + crop_size)``.
+    """
+    window = min(2 * crop_size, array_size)
+    ideal_start = pos - (window - crop_size) // 2
+    aligned_start = (ideal_start // _WINDOW_ALIGN) * _WINDOW_ALIGN
+    max_start = array_size - window
+    start = max(0, min(aligned_start, max_start))
+    return start, window
+
+
+def crop_windows(
+    image_rgb: Image.Image,
+    policy: CropPolicy,
+    *,
+    seed_material: bytes | None = None,
+) -> tuple[np.ndarray, list[CropWindow]]:
+    """The padded array :func:`crops_for` cuts from, and one window per crop.
+
+    Same arguments, same order, same length as :func:`crops_for` (both read
+    their positions from :func:`_placement`), so window ``i`` surrounds crop
+    ``i`` exactly. Used by
+    :mod:`imgforensics.detectors.features` to augment a neighbourhood
+    around each crop instead of the whole image -- see that module for why.
+    """
+    array, positions, _ = _placement(image_rgb, policy, seed_material)
+    height, width = array.shape[:2]
+    size = policy.size
+
+    windows: list[CropWindow] = []
+    for top, left in positions:
+        window_top, window_height = _window_span(top, size, height)
+        window_left, window_width = _window_span(left, size, width)
+        windows.append(
+            CropWindow(
+                top=window_top,
+                left=window_left,
+                height=window_height,
+                width=window_width,
+                crop_top=top - window_top,
+                crop_left=left - window_left,
+            )
+        )
+    return array, windows
 
 
 def to_array(

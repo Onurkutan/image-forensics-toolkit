@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `imgforensics.fusion.explain_report`: `build_report()` and `analyze --report-dir DIR`, writing `report.json`, per-detector heatmap and colour-mapped overlay PNGs (overlay downscaled to 1024 px on the longest side), and a `report.md` with plain-language cards ordered fused verdict, learned detectors, localizers, signals
+- `imgforensics.utils.jsonsafe`: shared JSON-safe conversion of detector details (numpy scalars/arrays, bytes, paths)
+- feature extraction: augmented views are computed on 16-pixel-aligned 2x crop windows instead of the whole image, and `features extract --workers N` runs decoding, window cutting and augmentation in worker processes while the backbone stays in the main process; the un-augmented view 0 is unchanged and keeps its cache keys
 - Project skeleton, core types, CLI stub, CI
 - Literature surveys on AI-generated image detection, manipulation localization, and classical forensic signals (docs/research/)
 - Development roadmap (docs/ROADMAP.md)

@@ -24,6 +24,25 @@ Features are stored as float16 (half the disk, and well inside the precision
 of activations that were computed under float16 autocast on CUDA anyway) and
 returned as float32.
 
+Two things keep extraction bounded by the GPU rather than by one CPU core
+(``docs/benchmarks/02_experiment_summary.md``, "Cost"):
+
+- **Window augmentation.** An augmented view no longer runs
+  :func:`~imgforensics.eval.preprocess.augment` over the whole image before
+  cropping -- on a multi-thousand-pixel image that is most of the wall time,
+  for a full-resolution pass whose result is then thrown away outside each
+  crop. Instead, each crop gets its own
+  :func:`~imgforensics.detectors.crops.crop_windows` window (``2 x size``,
+  16px-grid-aligned) and only that window is augmented; see
+  :func:`_window_augmented_crops` for why this is an acceptable stand-in.
+  View 0 (never augmented) is unaffected either way.
+- **Parallel decode.** :meth:`FeatureExtractor.features_for_paths` accepts
+  ``workers > 1`` to decode, EXIF-transpose, window-cut and augment images in
+  a ``concurrent.futures.ProcessPoolExecutor`` (module-level
+  :func:`_run_decode_task`, spawn-safe the way
+  :mod:`imgforensics.eval.workers` is), while the backbone forward -- the
+  part that needs the GPU -- stays in the main process.
+
 ``torch`` is only needed by the extractor, and only inside its methods, so
 this module -- including the whole cache -- imports and works without the
 optional ``ml`` extra installed.
@@ -36,6 +55,7 @@ import json
 import re
 import time
 from collections.abc import Iterable, Iterator, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,7 +71,7 @@ from imgforensics.detectors.backbones import (
     normalization_for,
     resolve_device,
 )
-from imgforensics.detectors.crops import CropPolicy, crops_for, to_array
+from imgforensics.detectors.crops import CropPolicy, crop_windows, crops_for, to_array
 from imgforensics.eval.preprocess import AugmentationConfig, augment
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing only, never at runtime
@@ -259,6 +279,145 @@ def _view_seed(image_bytes: bytes, view: int, policy: CropPolicy) -> int:
     return int.from_bytes(hashlib.sha256(material).digest()[:8], byteorder="big")
 
 
+def _window_augmented_crops(
+    image_rgb: Image.Image,
+    policy: CropPolicy,
+    augment_cfg: AugmentationConfig,
+    rng: np.random.Generator,
+    *,
+    seed_material: bytes,
+) -> list[Image.Image]:
+    """Augment each crop's own window (:func:`~imgforensics.detectors.crops.crop_windows`)
+    rather than the whole image, then re-cut the crop from the augmented window.
+
+    Why a window is an acceptable stand-in for the whole image: every
+    operation :func:`~imgforensics.eval.preprocess.augment` can apply is
+    either a re-encode (JPEG/WEBP), which quantizes independent 8x8 blocks
+    aligned to the *encoder's* own origin, or a filter with no notion of
+    "whole image" at all (noise, cutout). Because
+    :func:`~imgforensics.detectors.crops.crop_windows` snaps every window's
+    top-left to a 16px multiple of the same grid the un-augmented crop sits
+    on (two full JPEG blocks), re-encoding the window quantizes the same 8x8
+    blocks a whole-image re-encode would have quantized in that
+    neighbourhood -- only pixels outside the window, which no crop ever
+    reads, would see a different quantization context. The one place this
+    is a real, visible approximation rather than an exact match:
+    downscale-upscale and Gaussian blur mix a pixel with its neighbours
+    within a finite radius, so a pixel within roughly ``size / 2`` of the
+    window's own edge sees a slightly different (window-clipped)
+    neighbourhood than it would under whole-image augmentation -- the same
+    trade any tiled or patch-based augmentation pipeline makes.
+
+    ``rng`` is drawn from once per crop, in the deterministic order
+    :func:`~imgforensics.detectors.crops.crop_windows` returns (the same
+    order :func:`~imgforensics.detectors.crops.crops_for` places crops in),
+    so a given ``rng`` state always produces the same sequence of augmented
+    crops for a given image and view.
+    """
+    array, windows = crop_windows(image_rgb, policy, seed_material=seed_material)
+    size = policy.size
+
+    crops: list[Image.Image] = []
+    for window in windows:
+        patch = array[
+            window.top : window.top + window.height,
+            window.left : window.left + window.width,
+        ]
+        augmented = augment(Image.fromarray(patch, mode="RGB"), augment_cfg, rng)
+        augmented_array = np.asarray(augmented.convert("RGB"), dtype=np.uint8)
+        crop = augmented_array[
+            window.crop_top : window.crop_top + size,
+            window.crop_left : window.crop_left + size,
+        ]
+        crops.append(Image.fromarray(crop, mode="RGB"))
+    return crops
+
+
+def _compute_crops_for_view(
+    image: ForensicImage,
+    view: int,
+    policy: CropPolicy,
+    augment_cfg: AugmentationConfig | None,
+    window_augment: bool,
+) -> list[Image.Image]:
+    """Crops for one (image, view): the logic shared by the main-process and worker paths.
+
+    View 0 -- or any view when ``augment_cfg`` is ``None`` -- is
+    :func:`~imgforensics.detectors.crops.crops_for` on the plain image, byte
+    for byte identical to every prior release of this module (pinned by
+    ``test_view_zero_is_byte_identical_to_the_pre_window_implementation`` in
+    ``tests/test_detectors_features.py``). A view above 0 augments each
+    crop's own window when ``window_augment`` is true, the default (see
+    :func:`_window_augmented_crops`); passing ``window_augment=False``
+    instead augments the whole image before cropping, exactly as every
+    version of this module did before window augmentation existed. That
+    flag exists only as the pre-change baseline the timing comparison in
+    ``docs/benchmarks/`` measures against -- new code should leave it at the
+    default.
+    """
+    material = image.raw if image.raw is not None else np.asarray(image.rgb).tobytes()
+    if view == 0 or augment_cfg is None:
+        return crops_for(image.rgb, policy, seed_material=material)
+
+    rng = np.random.default_rng(_view_seed(material, view, policy))
+    if not window_augment:
+        source = augment(image.rgb, augment_cfg, rng)
+        return crops_for(source, policy, seed_material=material)
+    return _window_augmented_crops(image.rgb, policy, augment_cfg, rng, seed_material=material)
+
+
+@dataclass
+class _DecodeTask:
+    """One image's decode-and-crop work, dispatched to a worker process.
+
+    Carries only a path (the worker re-reads and decodes it itself, mirroring
+    ``imgforensics.eval.workers.WorkerTask``) and picklable, primitive-ish
+    configuration -- no closures, no open file handles -- because Windows'
+    ``spawn`` start method must be able to ship this to a fresh interpreter.
+    """
+
+    path: Path
+    views: tuple[int, ...]
+    crop_policy: CropPolicy
+    augment: AugmentationConfig | None
+    window_augment: bool
+
+
+@dataclass
+class _DecodeResult:
+    """What :func:`_run_decode_task` returns for one :class:`_DecodeTask`."""
+
+    path: Path
+    crops_by_view: dict[int, list[np.ndarray]]
+
+
+def _run_decode_task(task: _DecodeTask) -> _DecodeResult:
+    """Decode one image once and cut every requested view's crops from it.
+
+    Module-level so it can be the target of a ``ProcessPoolExecutor`` under
+    Windows' ``spawn`` start method (see the module docstring of
+    :mod:`imgforensics.eval.workers` for why that constraint rules out
+    closures and bound methods). Decoding, EXIF transpose, window cutting
+    and augmentation all happen here, in a worker process, so only the
+    backbone forward pass -- the part that actually needs the GPU -- competes
+    for the main process's attention. Crops come back as uint8 arrays rather
+    than PIL Images: that is what
+    :func:`imgforensics.detectors.crops.to_array` needs anyway, and it avoids
+    re-pickling PIL's own internal image state across the process boundary.
+    """
+    image = ForensicImage.from_path(task.path)
+    crops_by_view = {
+        view: [
+            np.asarray(crop.convert("RGB"), dtype=np.uint8)
+            for crop in _compute_crops_for_view(
+                image, view, task.crop_policy, task.augment, task.window_augment
+            )
+        ]
+        for view in task.views
+    }
+    return _DecodeResult(path=task.path, crops_by_view=crops_by_view)
+
+
 class FeatureExtractor:
     """Turns images into frozen-backbone features, batching crops across images.
 
@@ -275,6 +434,7 @@ class FeatureExtractor:
         batch_size: int = _DEFAULT_BATCH_SIZE,
         augment: AugmentationConfig | None = None,
         views: int = 1,
+        window_augment: bool = True,
     ) -> None:
         """Build an extractor (nothing is loaded or downloaded yet).
 
@@ -288,11 +448,18 @@ class FeatureExtractor:
                 backbone's own ``input_size`` as the crop size.
             batch_size: Maximum number of *crops* (not images) per forward
                 pass.
-            augment: Training-time augmentation applied to the whole image
-                before cropping, for every view above 0. ``None`` (the
-                default) leaves every view un-augmented.
+            augment: Training-time augmentation applied for every view above
+                0. ``None`` (the default) leaves every view un-augmented.
             views: How many views per image to produce. View 0 is always the
                 un-augmented image; views 1..K-1 are augmented copies.
+            window_augment: When true (the default), augmentation for a view
+                above 0 runs on a small window around each crop rather than
+                the whole image -- see :func:`_window_augmented_crops`. Set
+                to ``False`` only to reproduce the pre-window whole-image
+                behaviour (used by the throughput comparison in
+                ``docs/benchmarks/``); it must not be combined with a cache,
+                since its output does not match what the same cache key
+                would hold for the default, window-augmented path.
 
         Raises:
             KeyError: ``backbone`` is not a registered backbone name.
@@ -303,6 +470,7 @@ class FeatureExtractor:
         self.batch_size = max(1, int(batch_size))
         self.augment = augment
         self.views = max(1, int(views))
+        self.window_augment = window_augment
         self._model: torch.nn.Module | None = None
         self._normalization: tuple[tuple[float, ...], tuple[float, ...]] | None = None
         #: Cache hits during the most recent :meth:`features_for_paths` call,
@@ -346,14 +514,13 @@ class FeatureExtractor:
         The augmentation is seeded from the image's bytes and the view index
         (:func:`_view_seed`), so a view is reproducible from the image alone
         -- re-running an extraction, or filling in a view a previous run was
-        interrupted before writing, reproduces the same pixels.
+        interrupted before writing, reproduces the same pixels. Thin wrapper
+        over :func:`_compute_crops_for_view`, the module-level version the
+        ``workers > 1`` path also calls from a worker process.
         """
-        material = image.raw if image.raw is not None else np.asarray(image.rgb).tobytes()
-        source = image.rgb
-        if view > 0 and self.augment is not None:
-            rng = np.random.default_rng(_view_seed(material, view, self.crop_policy))
-            source = augment(source, self.augment, rng)
-        return crops_for(source, self.crop_policy, seed_material=material)
+        return _compute_crops_for_view(
+            image, view, self.crop_policy, self.augment, self.window_augment
+        )
 
     def features_for_image(self, image: ForensicImage, view: int = 0) -> np.ndarray:
         """Features for one image: ``(n_crops, n_layers, D)`` float32.
@@ -373,6 +540,7 @@ class FeatureExtractor:
         paths: Iterable[str | Path],
         cache: FeatureCache | None = None,
         progress: bool = True,
+        workers: int = 1,
     ) -> Iterator[tuple[Path, int, np.ndarray]]:
         """Yield ``(path, view, features)`` for every path and view, in input order.
 
@@ -381,25 +549,89 @@ class FeatureExtractor:
         batch stays full even when each image contributes only a few crops.
         When a ``cache`` is given, a view whose features are already cached is
         never recomputed; an image is decoded only if at least one of its
-        views missed. Newly computed features are written before they are
-        yielded.
+        views missed, and a cache hit is always answered here, in the main
+        process, without decoding -- regardless of ``workers``. Newly
+        computed features are written before they are yielded.
 
         Args:
             paths: Image paths to process, in the order results are wanted.
             cache: Optional :class:`FeatureCache` to read from and write to.
             progress: Print a one-line progress count every 50 images (plain
                 ``print``, as in :func:`imgforensics.data.manifest.build_manifest`).
+            workers: When 1 (the default), every image is decoded,
+                EXIF-transposed, window-cut and augmented in this process,
+                one at a time, exactly as in every prior release. When
+                greater than 1, that work for each cache miss runs in a
+                ``concurrent.futures.ProcessPoolExecutor`` with this many
+                worker processes (module-level :func:`_run_decode_task`,
+                spawn-safe on Windows); only the backbone forward pass stays
+                here. Results are merged back in the same path order either
+                way, and crops are batched across images and views exactly
+                as with ``workers=1`` -- decoding a later image now overlaps
+                the previous batch's forward pass instead of blocking it.
+
+        Raises:
+            ValueError: ``window_augment=False`` (see :meth:`__init__`) is
+                combined with a ``cache`` while augmented views would
+                actually be produced (``augment`` is set and ``views > 1``)
+                -- that combination would let the whole-image-augmented and
+                window-augmented paths silently collide under the same
+                cache key.
+        """
+        if (
+            self.window_augment is False
+            and cache is not None
+            and self.augment is not None
+            and self.views > 1
+        ):
+            raise ValueError(
+                "window_augment=False cannot be combined with a cache: its output for "
+                "a view above 0 differs from the default window-augmented path but "
+                "would collide with it under the same cache key. Pass cache=None (as "
+                "the throughput comparison in docs/benchmarks/ does), or leave "
+                "window_augment at its default."
+            )
+
+        self.cache_hits = 0
+        all_paths = [Path(path) for path in paths]
+        workers = max(1, int(workers))
+        if workers == 1:
+            yield from self._drain(
+                self._prepare_serial(all_paths, cache), cache, progress, len(all_paths)
+            )
+        else:
+            yield from self._features_for_paths_parallel(all_paths, cache, progress, workers)
+
+    def _prepare_serial(
+        self, all_paths: Sequence[Path], cache: FeatureCache | None
+    ) -> Iterator[tuple[Path, list[_Pending]]]:
+        """One ``(path, pendings)`` pair per path, decoding in this process (``workers=1``)."""
+        for path in all_paths:
+            pendings = self._prepare(path, cache)
+            self.cache_hits += sum(1 for pending in pendings if pending.features is not None)
+            yield path, pendings
+
+    def _drain(
+        self,
+        path_pendings: Iterable[tuple[Path, list[_Pending]]],
+        cache: FeatureCache | None,
+        progress: bool,
+        total: int,
+    ) -> Iterator[tuple[Path, int, np.ndarray]]:
+        """Batch every path's crops across images and views, flushing at ``batch_size``.
+
+        Shared by the ``workers=1`` and ``workers>1`` paths of
+        :meth:`features_for_paths` so both batch identically: consumes
+        ``path_pendings`` (already resolved -- cache hits answered, cache
+        misses carrying their crops) in order and yields exactly what
+        :meth:`_flush` yields, at the same points in the stream, regardless
+        of where the crops for a miss were actually decoded.
         """
         queue: list[_Pending] = []
         queued_crops = 0
         done = 0
         reported = 0
-        self.cache_hits = 0
-        all_paths = [Path(path) for path in paths]
-
-        for path in all_paths:
-            pendings = self._prepare(path, cache)
-            self.cache_hits += sum(1 for pending in pendings if pending.features is not None)
+        for _path, pendings in path_pendings:
             queue.extend(pendings)
             queued_crops += sum(len(pending.crops) for pending in pendings)
             done += 1
@@ -407,13 +639,110 @@ class FeatureExtractor:
                 yield from self._flush(queue, cache)
                 queue, queued_crops = [], 0
                 if progress and done - reported >= _PROGRESS_EVERY:
-                    print(f"[features] {done}/{len(all_paths)} images")
+                    print(f"[features] {done}/{total} images")
                     reported = done
 
         if queue:
             yield from self._flush(queue, cache)
         if progress:
-            print(f"[features] {done}/{len(all_paths)} images")
+            print(f"[features] {done}/{total} images")
+
+    def _features_for_paths_parallel(
+        self,
+        all_paths: list[Path],
+        cache: FeatureCache | None,
+        progress: bool,
+        workers: int,
+    ) -> Iterator[tuple[Path, int, np.ndarray]]:
+        """The ``workers > 1`` path of :meth:`features_for_paths`.
+
+        Pass 1 (here, in the main process): hash each path's bytes and
+        answer every cache hit -- cheap enough, next to a full decode, that
+        it is not worth parallelizing, and it means a fully cached run never
+        starts a process pool at all. Every path left with at least one
+        missing view becomes one :class:`_DecodeTask` (one task per *path*,
+        not per view, so an image with several missing views is decoded once
+        and shared across them, exactly like :meth:`_prepare`).
+
+        Pass 2: every task is submitted to the pool at once via
+        ``executor.map``, which yields results in submission order -- the
+        same order ``all_paths`` is in -- so results are merged back path by
+        path with no reordering, and handed to :meth:`_drain` to batch and
+        forward exactly as the ``workers=1`` path does.
+
+        The ``window_augment=False`` + cache guard already ran in
+        :meth:`features_for_paths` before this method was reached.
+        """
+        by_path: list[list[_Pending]] = []
+        tasks: list[_DecodeTask] = []
+        task_index_for_path: list[int | None] = []
+
+        for path in all_paths:
+            data = path.read_bytes()
+            digest = hashlib.sha256(data).hexdigest()
+            pendings: list[_Pending] = []
+            missing_views: list[int] = []
+            for view in range(self.views):
+                key: CacheKey | None = None
+                if cache is not None:
+                    key = cache.key_for(
+                        digest,
+                        self.spec.name,
+                        self.crop_policy,
+                        augment=None if view == 0 else self.augment,
+                        view=view,
+                    )
+                    cached = cache.get(key)
+                    if cached is not None:
+                        pendings.append(_Pending(path=path, view=view, key=key, features=cached))
+                        continue
+                pendings.append(_Pending(path=path, view=view, key=key))
+                missing_views.append(view)
+            by_path.append(pendings)
+            if missing_views:
+                task_index_for_path.append(len(tasks))
+                tasks.append(
+                    _DecodeTask(
+                        path=path,
+                        views=tuple(missing_views),
+                        crop_policy=self.crop_policy,
+                        augment=self.augment,
+                        window_augment=self.window_augment,
+                    )
+                )
+            else:
+                task_index_for_path.append(None)
+
+        self.cache_hits = sum(
+            1 for pendings in by_path for pending in pendings if pending.features is not None
+        )
+
+        if not tasks:
+            paired = zip(all_paths, by_path, strict=True)
+            yield from self._drain(paired, cache, progress, len(all_paths))
+            return
+
+        executor = ProcessPoolExecutor(max_workers=workers)
+        try:
+            results = executor.map(_run_decode_task, tasks)
+
+            def merged() -> Iterator[tuple[Path, list[_Pending]]]:
+                for path, pendings, task_index in zip(
+                    all_paths, by_path, task_index_for_path, strict=True
+                ):
+                    if task_index is not None:
+                        result = next(results)
+                        for pending in pendings:
+                            if pending.features is None:
+                                pending.crops = [
+                                    Image.fromarray(array, mode="RGB")
+                                    for array in result.crops_by_view[pending.view]
+                                ]
+                    yield path, pendings
+
+            yield from self._drain(merged(), cache, progress, len(all_paths))
+        finally:
+            executor.shutdown(wait=True)
 
     def _prepare(self, path: Path, cache: FeatureCache | None) -> list[_Pending]:
         """Read one image's views, answering from ``cache`` where possible.
@@ -479,6 +808,7 @@ def extract_to_cache(
     cache: FeatureCache,
     extractor: FeatureExtractor,
     progress: bool = True,
+    workers: int = 1,
 ) -> dict[str, float | int | str]:
     """Extract and cache features for ``paths``, returning a small run summary.
 
@@ -492,12 +822,18 @@ def extract_to_cache(
     (and, on the very first run, the weight download) that the first uncached
     image triggers -- so the reported throughput of a short run understates
     the steady-state rate. A fully cached run loads no backbone at all.
+
+    ``workers`` is forwarded to :meth:`FeatureExtractor.features_for_paths`
+    (decode/augment in a process pool when greater than 1; the backbone
+    forward always stays in this process).
     """
     start = time.perf_counter()
     shape: tuple[int, ...] | None = None
     arrays = 0
     images: set[Path] = set()
-    for path, _, features in extractor.features_for_paths(paths, cache=cache, progress=progress):
+    for path, _, features in extractor.features_for_paths(
+        paths, cache=cache, progress=progress, workers=workers
+    ):
         shape = features.shape
         arrays += 1
         images.add(path)
