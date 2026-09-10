@@ -80,9 +80,11 @@ def test_cocoglide_layout_attaches_masks_to_the_manipulated_half(tmp_path: Path)
 
 
 def _make_synthbuster_like_tree(root: Path) -> None:
+    # synthbuster.zip unpacks to one top-level ``synthbuster/`` folder with a
+    # folder per generator inside it, and the layout reaches through it.
     for generator in ("dalle3", "sdxl", "firefly"):
         for i in range(2):
-            _img(root / generator / f"img{i}.png")
+            _img(root / "synthbuster" / generator / f"img{i}.png")
 
 
 def test_layout_adapter_on_synthbuster_style_tree(tmp_path: Path) -> None:

@@ -108,3 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `imgforensics.detectors.features`: `FeatureExtractor.features_for_paths()` yields `(path, view, features)` instead of `(path, features)`, and `cache_hits` counts image-view pairs rather than images; `extract_to_cache()`'s summary gains `views` and `arrays`
 - `imgforensics.eval.baselines`: the `signals_mean` baseline and the benchmark runner's `--all-signals` now iterate `imgforensics.signals.SIGNAL_NAMES` rather than the whole registry, so the signals floor a learned detector is measured against does not quietly absorb the learned detector itself once the `ml` extra registers one
 - `imgforensics.detectors.crops`: `crops_for()` places its crops itself instead of delegating to `imgforensics.eval.preprocess`'s `center_crop`/`random_crops`, so `crop_boxes()` can report the same rectangles; the results are pixel-identical and a test pins that they stay so
+
+### Fixed
+
+- packaged Synthbuster layout: `synthbuster.zip` unpacks to a single top-level `synthbuster/` folder with one folder per generator inside it, so the fake glob now reaches through that folder (`synthbuster/*/*`) instead of matching nothing; the layout's notes name the nine generator folders as verified against the archive

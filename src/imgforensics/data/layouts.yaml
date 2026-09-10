@@ -17,21 +17,24 @@
 layouts:
   - dataset: "Synthbuster"
     real_globs: []
-    fake_globs: ["*/*"]
+    fake_globs: ["synthbuster/*/*"]
     generator_from: "parent"
     split_from: "none"
     mask_template: null
     exclude_globs: []
     notes: >-
-      The archive (synthbuster.zip) holds only the 9 generators' fake
-      images, one folder per generator; build_manifest's own extension
-      filter (.jpg/.jpeg/.png/.webp/.tif/.tiff) does the file-type
-      narrowing, so the glob itself is left generic rather than guessing
-      exact generator folder names (not documented in the repo README as
-      of 2026-09-09). Real images (RAISE-1k) are a separate download
-      (registry entry "RAISE") with no documented pairing folder --
-      prepare() on this root alone yields a fake-only manifest, which the
-      bias audit will (correctly) flag as single-label.
+      synthbuster.zip unpacks to a single top-level folder, synthbuster/,
+      holding one folder per generator (dalle2, dalle3, firefly, glide,
+      midjourney-v5, stable-diffusion-1-3, stable-diffusion-1-4,
+      stable-diffusion-2, stable-diffusion-xl; verified against the
+      archive on 2026-09-10) with 1,000 PNGs each, so the glob reaches
+      through that folder and the generator name is the parent folder.
+      build_manifest's own extension filter does the file-type narrowing
+      (the archive also carries a csv, a script and a few text files at the
+      top level, which the glob never reaches). Real images (RAISE-1k) are a
+      separate download (registry entry "RAISE") with no documented pairing
+      folder -- prepare() on this root alone yields a fake-only manifest,
+      which the bias audit will (correctly) flag as single-label.
 
   - dataset: "COCO"
     real_globs: ["val2017/**", "train2017/**"]
