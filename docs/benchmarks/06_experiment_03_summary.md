@@ -72,11 +72,49 @@ Every feature was already cached from experiment 02, so training ran from the ca
 minutes for 18 epochs while another benchmark shared the machine. The four benchmarks took
 11 minutes with the head alone and attribution switched off (`IMGFORENSICS_HEAD_ATTRIBUTION=0`).
 
+## Fusion on the cross-dataset head
+
+The stacking fuser was refitted on this head plus the seven classical signals, on the same
+WildRF val split as [fusion 01](04_fusion_wildrf.md) (398 images, clean level; signal
+records reused from that run, head records from
+[`06_exp03_wildrf_val.md`](06_exp03_wildrf_val.md)), and evaluated with
+`imgforensics fusion eval` on the same 1,000-image test sample
+([`06_exp03_fusion_wildrf.md`](06_exp03_fusion_wildrf.md)). The experiment 02 fuser,
+re-evaluated with the same command, reproduces every number of fusion 01
+([`04_fusion_wildrf_eval.md`](04_fusion_wildrf_eval.md)).
+
+| Scorer (WildRF test, clean) | n | AUC | Balanced acc. at 0.5 | FPR at 0.5 | TPR at 0.5 | ECE |
+|---|---|---|---|---|---|---|
+| `dinov2_head` (experiment 03) alone | 1,000 | 0.804 | 0.673 | 0.547 | 0.893 | 0.216 |
+| Fused, all images | 1,000 | 0.831 | 0.750 | 0.238 | 0.738 | 0.044 |
+| Fused, outside the abstain band | 31 | 0.935 | 0.750 | 0.000 | 0.500 | 0.048 |
+
+Three things the table says:
+
+- **The signals absorb part of the damage.** The false-positive rate falls from 54.7% to
+  23.8% and the calibration error from 0.216 to 0.044, at the cost of recall (89.3% to
+  73.8%). The fitted weights show how: the head's logit weight drops from 0.86 (experiment
+  02 fuser) to 0.29, while `ela` rises from 0.36 to 1.14, `double_jpeg` from 0.07 to 0.63
+  and `jpeg_ghost` deepens from -0.76 to -1.37. On a distribution the head has not seen,
+  the fuser hands the decision back to the JPEG-domain signals, which is what a stacking
+  layer fitted on that distribution should do, and a reminder that those weights are
+  WildRF's, not universal.
+- **The abstain band does its job and does it almost completely.** With a 0.9
+  balanced-accuracy target the band search settled on [0.030, 0.980], inside which 96.9%
+  of the test images fall. The fuser is saying "not sure" about nearly everything, which
+  is the honest answer for this head on this data, but the 31 images it does call are too
+  few to mean much (the "1.000 outside-band balanced accuracy" recorded at fit time rests
+  on three held-out images).
+- **The band fit needs a minimum support.** `fit_fuser` accepts the widest band that
+  meets the target on the held-out split, with no floor on how many images must remain
+  outside it. A floor (an absolute count and a fraction of the held-out split) turns a
+  three-image band into a reported failure to meet the target, which is the more useful
+  outcome. That is the next change to the fusion layer.
+
 ## Next
 
-- Refit the fuser and its abstain band on records from this head, to see how much of the
-  false-positive rate the classical signals and the band can absorb on an unseen real
-  distribution.
+- Give the band search a minimum outside-band support and report when the target cannot
+  be met; refit both fusers under the new rule.
 - Add a second laundered real source that is not WildRF to training (the roadmap's
   in-house social-media re-share pipeline over COCO is the licence-clean candidate) and
   re-run this test.

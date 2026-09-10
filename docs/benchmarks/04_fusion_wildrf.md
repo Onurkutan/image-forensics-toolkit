@@ -8,6 +8,11 @@ in [`02_wildrf_test_signals.md`](02_wildrf_test_signals.md).
 
 ## Result
 
+Reproduce this table from the saved records with
+`imgforensics fusion eval data/benchmarks/02_wildrf_test_signals.json data/benchmarks/02_wildrf_test.json --fuser weights/fuser_wildrf.json`;
+the command's output is in [`04_fusion_wildrf_eval.md`](04_fusion_wildrf_eval.md).
+
+
 | Scorer | AUC | Balanced acc. at 0.5 | FPR at 0.5 | TPR at 0.5 |
 |---|---|---|---|---|
 | `dinov2_head` alone | 0.980 | 0.916 | 0.137 | 0.970 |

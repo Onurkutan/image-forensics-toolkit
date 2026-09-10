@@ -244,8 +244,17 @@ measured the same way from its first training run.
   the head alone, false-positive rate 13.7% to 3.6% at 0.5, and outside the abstain band
   (53% of images) balanced accuracy 0.996. `jpeg_ghost` and `copy_move` received negative
   weights on this data, a reminder that a fuser is a dataset-specific calibration layer. See
-  [`docs/benchmarks/04_fusion_wildrf.md`](benchmarks/04_fusion_wildrf.md). Still open: the
-  explanation report with heatmap overlays and Grad-CAM, and fusion across robustness levels.
+  [`docs/benchmarks/04_fusion_wildrf.md`](benchmarks/04_fusion_wildrf.md).
+- **Result of fusion 02 (2026-09-10):** the same fuser refitted on the experiment 03 head
+  (WildRF never seen in training). On the WildRF test sample: AUC 0.804 to 0.831,
+  false-positive rate 54.7% to 23.8%, ECE 0.216 to 0.044, recall 89.3% to 73.8%; the head's
+  weight falls from 0.86 to 0.29 and the JPEG-domain signals take over. The abstain band
+  covers 96.9% of the images, an honest answer that also exposes a gap: the band search has
+  no minimum support, so its fit-time "1.000 outside the band" rested on three images. See
+  [`docs/benchmarks/06_experiment_03_summary.md`](benchmarks/06_experiment_03_summary.md).
+  `imgforensics fusion eval` now reproduces every fusion table from saved records. Shipped
+  since fusion 01: the explanation report with heatmap overlays and Grad-CAM attribution.
+  Still open: fusion across robustness levels (records being collected) and the band floor.
 
 ### Phase 6 — Product and release
 
