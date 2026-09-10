@@ -249,7 +249,21 @@ measured the same way from its first training run.
 
 ### Phase 6 — Product and release
 
-- FastAPI service, Gradio demo (Hugging Face Space), ONNX export for CPU inference.
+The end product is an **interactive forensic workbench**: one image, a tree of tools grouped
+by what they look at, every tool's map sharing one pan/zoom with the original, calibrated
+scores with the abstain band always visible, and a report export. The reference for the
+experience is Sherloq (GPL-3.0; ideas only, nothing ported). The architecture, the tool
+catalogue and the one open decision (web or desktop client) are in
+[`docs/design/01_toolbox_architecture.md`](design/01_toolbox_architecture.md).
+
+- 6a. Service layer inside the library: tool catalogue with parameter specs, analysis
+  sessions with cached results and map pyramids, a `view` tool kind for maps without a
+  verdict. Headless and tested without any GUI.
+- 6b. FastAPI wrapper (`api` extra) over the service; OpenAPI as the client contract.
+- 6c. Gradio stopgap demo on a Hugging Face Space; head weights published to the Hub under
+  a research-only card.
+- 6d. The workbench client (web recommended), then the demo is retired.
+- 6e. CPU inference: ONNX export of the head, a faster JPEG coefficient decoder.
 - Documentation site or extended README with benchmark report and limitations section.
 - v1.0 tag.
 
