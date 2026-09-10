@@ -470,7 +470,12 @@ a fuser degrades gracefully with a subset of its detectors present; a "real
 below low / fake above high / uncertain in between" band is fitted on a
 held-out split so the fuser can say "not sure" instead of guessing.
 `imgforensics fusion info fuser.json` prints its weights, band and metrics
-(train/held-out AUC, ECE before/after calibration, abstain rate).
+(train/held-out AUC, ECE before/after calibration, abstain rate). The band search only
+accepts a band that leaves enough held-out images outside it -- the larger of
+`--min-outside-count` (default 20) and `--min-outside-fraction` (default 0.10) of the
+held-out split -- because a band supported by a handful of images is a loophole, not a
+fit; when no such band meets the target, the best one is kept and `band target met` is
+reported as false.
 
 `imgforensics analyze IMAGE --report-dir DIR` writes a self-contained report folder: `report.json`
 with every detector's score, label and details plus the fused verdict when a fuser is configured,

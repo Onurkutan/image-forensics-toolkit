@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -66,7 +67,10 @@ _EPSILON = 1e-4
 #: the temperature toward 0 (a step function).
 _TEMPERATURE_BOUNDS = (0.05, 20.0)
 
-_FORMAT_VERSION = 1
+#: ``format_version`` bumped 1 -> 2 for the ``outside_band_count`` / ``band_target_met`` /
+#: ``min_outside_count`` fields added below. :meth:`Fuser.from_dict` defaults all three when
+#: absent, so a version-1 file (no ``format_version`` key, or ``format_version: 1``) still loads.
+_FORMAT_VERSION = 2
 _HOLDOUT_FRACTION = 0.2
 _GD_ITERATIONS = 300
 _LINE_SEARCH_MAX_STEPS = 30
@@ -79,6 +83,16 @@ _ARMIJO_C = 1e-4
 #: convention in ``imgforensics.eval.metrics._DEFAULT_PIXEL_THRESHOLDS``.
 _BAND_GRID = np.linspace(0.0, 1.0, 101)
 _TEMPERATURE_GRID_POINTS = 400
+
+#: Default minimum-support floor for an abstain band candidate (see
+#: :func:`_min_outside_floor`): a band is only admissible if it leaves at least this many
+#: held-out images outside it, or ``ceil(_MIN_OUTSIDE_FRACTION * n_holdout)``, whichever is
+#: larger. Without this floor the band search can accept a band a handful of held-out images
+#: happen to fall outside of and report a perfect outside-band accuracy on them -- three
+#: images out of ~80 is not evidence the band works, it is the search finding a loophole
+#: (see ``docs/benchmarks/06_experiment_03_summary.md``, "Fusion on the cross-dataset head").
+_MIN_OUTSIDE_COUNT = 20
+_MIN_OUTSIDE_FRACTION = 0.10
 
 #: Registry names :func:`default_detectors` excludes: the trivial baselines
 #: (see ``imgforensics.eval.baselines``) are deliberately not detectors a
@@ -359,27 +373,58 @@ def _balanced_accuracy_outside(y_outside: np.ndarray, predicted_fake: np.ndarray
     return (tpr + tnr) / 2.0
 
 
-def _fit_band(y: np.ndarray, probs: np.ndarray, target: float) -> tuple[float, float, float]:
+def _min_outside_floor(n_holdout: int, min_outside_fraction: float, min_outside_count: int) -> int:
+    """The minimum number of held-out images a band candidate must leave outside it.
+
+    ``max(min_outside_count, ceil(min_outside_fraction * n_holdout))``, capped at
+    ``n_holdout``: a held-out split smaller than the configured floor must still be able to
+    fit a band, so the floor never asks for more outside images than exist. When the cap is
+    what binds -- ``n_holdout`` itself is below the configured floor -- every held-out image
+    must fall outside the band for a candidate to be admissible at all, i.e. "no abstention
+    on the held-out split" is the only band :func:`_fit_band` can accept.
+    """
+    return min(max(min_outside_count, math.ceil(min_outside_fraction * n_holdout)), n_holdout)
+
+
+@dataclass(frozen=True)
+class BandFit:
+    """The abstain band :func:`_fit_band` chose, and whether it met the accuracy target."""
+
+    low: float
+    high: float
+    outside_bacc: float
+    outside_count: int
+    target_met: bool
+
+
+def _fit_band(y: np.ndarray, probs: np.ndarray, target: float, *, min_outside: int) -> BandFit:
     """Choose ``(low, high)`` so real/fake predictions outside the band meet ``target``.
 
-    Searches every ``(low, high)`` pair on :data:`_BAND_GRID` (``low <=
-    high``) for the widest band whose *outside*-band balanced accuracy
-    (real below low, fake above high) is at least ``target``. When no band
-    reaches ``target``, falls back to the band(s) reaching the best
-    achievable balanced accuracy, again preferring the widest.
+    Searches every ``(low, high)`` pair on :data:`_BAND_GRID` (``low <= high``), first
+    discarding any candidate that leaves fewer than ``min_outside`` held-out images outside
+    it (see :func:`_min_outside_floor` for how that floor is computed, and
+    :data:`_MIN_OUTSIDE_COUNT` for why a band needs real support to mean anything). Among the
+    admissible candidates, picks the widest whose *outside*-band balanced accuracy (real
+    below low, fake above high) is at least ``target``, as before the floor existed. When no
+    admissible candidate reaches ``target``, falls back to the admissible candidate with the
+    highest achievable balanced accuracy, narrower band breaking a tie -- narrower because a
+    fallback band already failed to earn its width by meeting the target, so nothing favours
+    keeping it wide.
 
     Returns:
-        ``(low, high, outside_band_balanced_accuracy)``.
+        :class:`BandFit`.
     """
-    best_overall: tuple[float, float, float, float] | None = None  # (bacc, width, low, high)
-    best_qualifying: tuple[float, float, float, float] | None = None
+    # Each candidate tuple is (bacc, width, low, high, outside_count).
+    best_overall: tuple[float, float, float, float, int] | None = None
+    best_qualifying: tuple[float, float, float, float, int] | None = None
 
     for low_index, low in enumerate(_BAND_GRID):
         below = probs < low
         for high in _BAND_GRID[low_index:]:
             above = probs > high
             outside = below | above
-            if not np.any(outside):
+            outside_count = int(np.count_nonzero(outside))
+            if outside_count == 0 or outside_count < min_outside:
                 continue
 
             bacc = _balanced_accuracy_outside(y[outside], above[outside])
@@ -388,24 +433,30 @@ def _fit_band(y: np.ndarray, probs: np.ndarray, target: float) -> tuple[float, f
             if (
                 best_overall is None
                 or bacc > best_overall[0] + 1e-9
-                or (abs(bacc - best_overall[0]) <= 1e-9 and width > best_overall[1])
+                or (abs(bacc - best_overall[0]) <= 1e-9 and width < best_overall[1])
             ):
-                best_overall = (bacc, width, float(low), float(high))
+                best_overall = (bacc, width, float(low), float(high), outside_count)
 
             if bacc >= target and (
                 best_qualifying is None
                 or width > best_qualifying[1] + 1e-12
                 or (abs(width - best_qualifying[1]) <= 1e-12 and bacc > best_qualifying[0])
             ):
-                best_qualifying = (bacc, width, float(low), float(high))
+                best_qualifying = (bacc, width, float(low), float(high), outside_count)
 
     chosen = best_qualifying if best_qualifying is not None else best_overall
     if chosen is None:
-        # Every candidate band had zero coverage outside it (degenerate:
-        # every held-out probability sits exactly at the grid's endpoints).
-        return 0.5, 0.5, 0.0
-    bacc, _width, low, high = chosen
-    return low, high, bacc
+        # No candidate cleared the min-outside floor (or, with min_outside == 0, every
+        # candidate had zero coverage outside it -- degenerate held-out data either way).
+        return BandFit(low=0.5, high=0.5, outside_bacc=0.0, outside_count=0, target_met=False)
+    bacc, _width, low, high, outside_count = chosen
+    return BandFit(
+        low=low,
+        high=high,
+        outside_bacc=bacc,
+        outside_count=outside_count,
+        target_met=best_qualifying is not None,
+    )
 
 
 @dataclass(frozen=True)
@@ -425,6 +476,12 @@ class FitInfo:
     n_real: int
     sources: list[str]
     levels: list[str]
+    #: The effective minimum-outside-images floor used by :func:`_fit_band` for this fit
+    #: (see :func:`_min_outside_floor`) -- not the raw ``min_outside_fraction`` /
+    #: ``min_outside_count`` arguments, but what they resolved to against this fuser's
+    #: actual held-out split size. Defaults to 0 when loaded from a file written before this
+    #: field existed, i.e. before the minimum-support floor was enforced at all.
+    min_outside_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -446,6 +503,15 @@ class FuserMetrics:
     ece_after: float
     abstain_rate: float
     outside_band_balanced_accuracy: float
+    #: How many held-out images the fitted band actually left outside it -- the raw count
+    #: :attr:`outside_band_balanced_accuracy` was measured on. Defaults to 0 when loaded
+    #: from a file written before the minimum-support floor existed.
+    outside_band_count: int = 0
+    #: Whether the fitted band met ``target_balanced_accuracy`` under the minimum-support
+    #: floor, or is the best-effort fallback :func:`_fit_band` returns when nothing admissible
+    #: did. Defaults to ``True`` when loaded from a file written before this field existed --
+    #: those files predate the floor, so the target was met the unconstrained way.
+    band_target_met: bool = True
 
 
 @dataclass
@@ -529,6 +595,7 @@ class Fuser:
                 "n_real": self.fit_info.n_real,
                 "sources": self.fit_info.sources,
                 "levels": self.fit_info.levels,
+                "min_outside_count": self.fit_info.min_outside_count,
             },
             "metrics": {
                 "train_auc": self.metrics.train_auc,
@@ -537,6 +604,8 @@ class Fuser:
                 "ece_after": self.metrics.ece_after,
                 "abstain_rate": self.metrics.abstain_rate,
                 "outside_band_balanced_accuracy": self.metrics.outside_band_balanced_accuracy,
+                "outside_band_count": self.metrics.outside_band_count,
+                "band_target_met": self.metrics.band_target_met,
             },
             "records_sha256": dict(self.records_sha256),
         }
@@ -572,6 +641,7 @@ class Fuser:
                 n_real=int(fit_data["n_real"]),
                 sources=list(fit_data["sources"]),
                 levels=list(fit_data["levels"]),
+                min_outside_count=int(fit_data.get("min_outside_count", 0)),
             ),
             metrics=FuserMetrics(
                 train_auc=float(metrics_data["train_auc"]),
@@ -582,6 +652,8 @@ class Fuser:
                 outside_band_balanced_accuracy=float(
                     metrics_data["outside_band_balanced_accuracy"]
                 ),
+                outside_band_count=int(metrics_data.get("outside_band_count", 0)),
+                band_target_met=bool(metrics_data.get("band_target_met", True)),
             ),
             records_sha256=dict(data.get("records_sha256", {})),  # type: ignore[call-overload]
             format_version=int(data.get("format_version", _FORMAT_VERSION)),  # type: ignore[call-overload]
@@ -605,6 +677,8 @@ def fit_fuser(
     l2: float = 1e-2,
     seed: int = 0,
     records_sha256: Mapping[str, str] | None = None,
+    min_outside_fraction: float = _MIN_OUTSIDE_FRACTION,
+    min_outside_count: int = _MIN_OUTSIDE_COUNT,
 ) -> Fuser:
     """Fit a calibrated stacking :class:`Fuser` on ``records``.
 
@@ -626,6 +700,14 @@ def fit_fuser(
         records_sha256: ``{source file: sha256}`` recorded in the artifact
             for traceability (see the CLI's ``fusion fit`` command); not
             computed here since ``records`` are already in memory.
+        min_outside_fraction: Minimum fraction of the held-out split a band
+            candidate must leave outside it to be admissible (see
+            :func:`_min_outside_floor`); a band supported by a handful of
+            held-out images is not evidence it works.
+        min_outside_count: Minimum absolute count for the same floor. The
+            floor actually used is ``max(min_outside_count, ceil(
+            min_outside_fraction * n_holdout))``, capped at ``n_holdout``
+            (recorded as :attr:`FitInfo.min_outside_count`).
 
     Raises:
         ValueError: if the fitting data is too small to form a non-empty
@@ -664,8 +746,11 @@ def fit_fuser(
     holdout_probs = _sigmoid(holdout_logits / temperature)
     ece_after = expected_calibration_error(y_holdout, holdout_probs)
 
-    low, high, outside_bacc = _fit_band(y_holdout, holdout_probs, target_balanced_accuracy)
-    inside_band = (holdout_probs >= low) & (holdout_probs <= high)
+    min_outside = _min_outside_floor(len(y_holdout), min_outside_fraction, min_outside_count)
+    band_fit = _fit_band(
+        y_holdout, holdout_probs, target_balanced_accuracy, min_outside=min_outside
+    )
+    inside_band = (holdout_probs >= band_fit.low) & (holdout_probs <= band_fit.high)
     abstain_rate = float(np.mean(inside_band))
 
     train_auc = roc_auc(y_train, train_probs_raw)
@@ -681,13 +766,14 @@ def fit_fuser(
         presence_weights=presence_weights,
         bias=bias,
         temperature=temperature,
-        band=Band(low=low, high=high),
+        band=Band(low=band_fit.low, high=band_fit.high),
         fit_info=FitInfo(
             n_images=n_images,
             n_fake=n_fake,
             n_real=n_images - n_fake,
             sources=features.sources,
             levels=features.levels_used,
+            min_outside_count=min_outside,
         ),
         metrics=FuserMetrics(
             train_auc=train_auc,
@@ -695,7 +781,9 @@ def fit_fuser(
             ece_before=ece_before,
             ece_after=ece_after,
             abstain_rate=abstain_rate,
-            outside_band_balanced_accuracy=outside_bacc,
+            outside_band_balanced_accuracy=band_fit.outside_bacc,
+            outside_band_count=band_fit.outside_count,
+            band_target_met=band_fit.target_met,
         ),
         records_sha256=dict(records_sha256) if records_sha256 else {},
     )

@@ -1200,6 +1200,23 @@ def fusion_fit(
             help="Target balanced accuracy outside the abstain band.",
         ),
     ] = 0.9,
+    min_outside_fraction: Annotated[
+        float,
+        typer.Option(
+            "--min-outside-fraction",
+            help=(
+                "Minimum fraction of the held-out split a band candidate must leave outside "
+                "it to be admissible."
+            ),
+        ),
+    ] = 0.10,
+    min_outside_count: Annotated[
+        int,
+        typer.Option(
+            "--min-outside-count",
+            help="Minimum absolute count for the same floor (the larger of the two applies).",
+        ),
+    ] = 20,
 ) -> None:
     """Fit a calibrated stacking fuser on one or more saved benchmark results."""
     records: list[ScoreRecord] = []
@@ -1216,6 +1233,8 @@ def fusion_fit(
             levels=level or None,
             target_balanced_accuracy=target_bacc,
             records_sha256=source_hashes,
+            min_outside_fraction=min_outside_fraction,
+            min_outside_count=min_outside_count,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -1243,7 +1262,15 @@ def fusion_fit(
     table.add_row(
         "outside-band balanced accuracy", f"{fitted.metrics.outside_band_balanced_accuracy:.4f}"
     )
+    table.add_row("outside-band images (held-out)", str(fitted.metrics.outside_band_count))
+    table.add_row("band target met", str(fitted.metrics.band_target_met))
     console.print(table)
+    if not fitted.metrics.band_target_met:
+        console.print(
+            f"[yellow]Warning:[/yellow] no admissible band reached the target balanced "
+            f"accuracy of {target_bacc:.3f}; best achieved was "
+            f"{fitted.metrics.outside_band_balanced_accuracy:.4f}."
+        )
     console.print(f"Wrote {out}")
 
 
@@ -1281,6 +1308,8 @@ def fusion_info(
     table.add_row(
         "outside-band balanced accuracy", f"{fitted.metrics.outside_band_balanced_accuracy:.4f}"
     )
+    table.add_row("outside-band images (held-out)", str(fitted.metrics.outside_band_count))
+    table.add_row("band target met", str(fitted.metrics.band_target_met))
     table.add_row("records_sha256", json.dumps(fitted.records_sha256))
     console.print(table)
 

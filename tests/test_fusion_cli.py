@@ -290,3 +290,73 @@ def test_cli_analyze_rejects_missing_fuser_file(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code != 0
+
+
+def test_cli_fusion_fit_reports_band_support_and_warns_when_target_is_missed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import dataclasses
+
+    from imgforensics import cli as cli_module
+
+    records = synthetic_fusion_records(n_per_class=200, seed=0)
+    records_path = _save_records(records, tmp_path)
+    fuser_path = tmp_path / "fuser.json"
+
+    fit_result = runner.invoke(
+        app,
+        [
+            "fusion",
+            "fit",
+            str(records_path),
+            "--out",
+            str(fuser_path),
+            "--min-outside-fraction",
+            "0.25",
+            "--min-outside-count",
+            "10",
+        ],
+    )
+    assert fit_result.exit_code == 0, fit_result.stdout
+    assert "outside-band images (held-out)" in fit_result.stdout
+    assert "band target met" in fit_result.stdout
+
+    fuser_data = json.loads(fuser_path.read_text(encoding="utf-8"))
+    assert fuser_data["format_version"] == 2
+    # 400 images -> about 80 held out (the split hashes entry paths, so not exactly);
+    # the floor is max(10, ceil(0.25 * n_holdout)), i.e. 20 give or take a few.
+    floor = fuser_data["fit"]["min_outside_count"]
+    assert 18 <= floor <= 24
+    assert fuser_data["metrics"]["outside_band_count"] >= floor
+
+    info_result = runner.invoke(app, ["fusion", "info", str(fuser_path)])
+    assert info_result.exit_code == 0, info_result.stdout
+    assert "band target met" in info_result.stdout
+
+    # A fit whose band missed its target is announced, not buried in a table row.
+    real_fit = cli_module.fit_fuser
+
+    def fit_that_misses_the_target(*args, **kwargs):
+        fitted = real_fit(*args, **kwargs)
+        metrics = dataclasses.replace(
+            fitted.metrics, band_target_met=False, outside_band_balanced_accuracy=0.8
+        )
+        return dataclasses.replace(fitted, metrics=metrics)
+
+    monkeypatch.setattr(cli_module, "fit_fuser", fit_that_misses_the_target)
+    missed = runner.invoke(
+        app,
+        [
+            "fusion",
+            "fit",
+            str(records_path),
+            "--out",
+            str(tmp_path / "f2.json"),
+            "--target-bacc",
+            "0.95",
+        ],
+    )
+    assert missed.exit_code == 0, missed.stdout
+    assert "Warning" in missed.stdout
+    assert "0.950" in missed.stdout
+    assert "0.8000" in missed.stdout
