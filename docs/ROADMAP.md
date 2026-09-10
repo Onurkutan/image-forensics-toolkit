@@ -248,13 +248,15 @@ measured the same way from its first training run.
 - **Result of fusion 02 (2026-09-10):** the same fuser refitted on the experiment 03 head
   (WildRF never seen in training). On the WildRF test sample: AUC 0.804 to 0.831,
   false-positive rate 54.7% to 23.8%, ECE 0.216 to 0.044, recall 89.3% to 73.8%; the head's
-  weight falls from 0.86 to 0.29 and the JPEG-domain signals take over. The abstain band
-  covers 96.9% of the images, an honest answer that also exposes a gap: the band search has
-  no minimum support, so its fit-time "1.000 outside the band" rested on three images. See
+  weight falls from 0.86 to 0.29 and the JPEG-domain signals take over. The band as first
+  fitted abstained on 96.9% of the images on the strength of three held-out images, which
+  exposed a gap in the band search; with the minimum-support rule now in `fit_fuser` (at
+  least 20 held-out images outside the band) the refitted band calls 20.2% of the test
+  images at balanced accuracy 0.887 and abstains on the rest. See
   [`docs/benchmarks/06_experiment_03_summary.md`](benchmarks/06_experiment_03_summary.md).
   `imgforensics fusion eval` now reproduces every fusion table from saved records. Shipped
   since fusion 01: the explanation report with heatmap overlays and Grad-CAM attribution.
-  Still open: fusion across robustness levels (records being collected) and the band floor.
+  Still open: fusion across robustness levels (records being collected).
 
 ### Phase 6 — Product and release
 

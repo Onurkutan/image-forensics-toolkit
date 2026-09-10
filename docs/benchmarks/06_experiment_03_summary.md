@@ -87,7 +87,8 @@ re-evaluated with the same command, reproduces every number of fusion 01
 |---|---|---|---|---|---|---|
 | `dinov2_head` (experiment 03) alone | 1,000 | 0.804 | 0.673 | 0.547 | 0.893 | 0.216 |
 | Fused, all images | 1,000 | 0.831 | 0.750 | 0.238 | 0.738 | 0.044 |
-| Fused, outside the abstain band | 31 | 0.935 | 0.750 | 0.000 | 0.500 | 0.048 |
+| Fused, outside the abstain band (floor of 20 held-out images) | 202 | 0.898 | 0.887 | 0.190 | 0.964 | 0.038 |
+| Fused, outside the band as first fitted (no floor) | 31 | 0.935 | 0.750 | 0.000 | 0.500 | 0.048 |
 
 Three things the table says:
 
@@ -99,22 +100,27 @@ Three things the table says:
   the fuser hands the decision back to the JPEG-domain signals, which is what a stacking
   layer fitted on that distribution should do, and a reminder that those weights are
   WildRF's, not universal.
-- **The abstain band does its job and does it almost completely.** With a 0.9
-  balanced-accuracy target the band search settled on [0.030, 0.980], inside which 96.9%
-  of the test images fall. The fuser is saying "not sure" about nearly everything, which
-  is the honest answer for this head on this data, but the 31 images it does call are too
-  few to mean much (the "1.000 outside-band balanced accuracy" recorded at fit time rests
-  on three held-out images).
-- **The band fit needs a minimum support.** `fit_fuser` accepts the widest band that
-  meets the target on the held-out split, with no floor on how many images must remain
-  outside it. A floor (an absolute count and a fraction of the held-out split) turns a
-  three-image band into a reported failure to meet the target, which is the more useful
-  outcome. That is the next change to the fusion layer.
+- **The abstain band, as first fitted, was a loophole.** With a 0.9 balanced-accuracy
+  target and no constraint on support, the band search settled on [0.030, 0.980], inside
+  which 96.9% of the test images fell; the 31 images it did call were too few to mean
+  anything, and the "1.000 outside-band balanced accuracy" recorded at fit time rested on
+  three held-out images.
+- **With a minimum support the band becomes a real operating point.** `fit_fuser` now
+  admits only bands that leave at least max(20, 10% of the held-out split) images outside
+  them. Refitted under that rule the band is [0.070, 0.850], supported by exactly the floor
+  of 20 held-out images at balanced accuracy 0.900. On the test sample it calls 202 of
+  1,000 images (abstains on 79.8%) at balanced accuracy 0.887, false-positive rate 0.190 and
+  recall 0.964. The experiment 02 fuser is unchanged by the rule (its band was already
+  supported by 48 held-out images) and reproduces every number of fusion 01.
+- **Read the 79.8% abstention as the honest number.** On social-media photographs this
+  head has never seen, the fused system is willing to give a verdict on one image in five
+  and is right about 89% of the time when it does; the rest it hands back as "uncertain".
+  That is what the abstain band is for.
 
 ## Next
 
-- Give the band search a minimum outside-band support and report when the target cannot
-  be met; refit both fusers under the new rule.
+- Fit the fuser across robustness levels once the WildRF level records are in (being
+  collected), and see whether the band holds under the social-media re-share level.
 - Add a second laundered real source that is not WildRF to training (the roadmap's
   in-house social-media re-share pipeline over COCO is the licence-clean candidate) and
   re-run this test.
