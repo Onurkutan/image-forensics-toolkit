@@ -198,6 +198,82 @@ def test_cli_analyze_without_fuser_option_is_unchanged(tmp_path: Path) -> None:
     assert "fusion" not in document
 
 
+def test_cli_fusion_eval_writes_report_and_json(tmp_path: Path) -> None:
+    records = synthetic_fusion_records(n_per_class=100, seed=0)
+    records_path = _save_records(records, tmp_path)
+    fuser_path = tmp_path / "fuser.json"
+
+    fit_result = runner.invoke(app, ["fusion", "fit", str(records_path), "--out", str(fuser_path)])
+    assert fit_result.exit_code == 0, fit_result.stdout
+
+    report_path = tmp_path / "eval.md"
+    json_path = tmp_path / "eval.json"
+    eval_result = runner.invoke(
+        app,
+        [
+            "fusion",
+            "eval",
+            str(records_path),
+            "--fuser",
+            str(fuser_path),
+            "--report",
+            str(report_path),
+            "--json",
+            str(json_path),
+        ],
+    )
+    assert eval_result.exit_code == 0, eval_result.stdout
+    assert report_path.is_file()
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "## Level: clean" in report_text
+    assert "fused_outside_band" in report_text
+
+    assert json_path.is_file()
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert set(payload.keys()) == {"detectors", "levels", "rows"}
+    assert set(payload["detectors"]) == {"informative", "inverted", "abstaining"}
+
+
+def test_cli_fusion_eval_rejects_unknown_level(tmp_path: Path) -> None:
+    records = synthetic_fusion_records(n_per_class=50, seed=0)
+    records_path = _save_records(records, tmp_path)
+    fuser_path = tmp_path / "fuser.json"
+
+    fit_result = runner.invoke(app, ["fusion", "fit", str(records_path), "--out", str(fuser_path)])
+    assert fit_result.exit_code == 0, fit_result.stdout
+
+    result = runner.invoke(
+        app,
+        [
+            "fusion",
+            "eval",
+            str(records_path),
+            "--fuser",
+            str(fuser_path),
+            "--level",
+            "does-not-exist",
+        ],
+    )
+    assert result.exit_code != 0
+
+
+def test_cli_fusion_eval_rejects_missing_fuser_file(tmp_path: Path) -> None:
+    records = synthetic_fusion_records(n_per_class=50, seed=0)
+    records_path = _save_records(records, tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "fusion",
+            "eval",
+            str(records_path),
+            "--fuser",
+            str(tmp_path / "does-not-exist.json"),
+        ],
+    )
+    assert result.exit_code != 0
+
+
 def test_cli_analyze_rejects_missing_fuser_file(tmp_path: Path) -> None:
     image_path = tmp_path / "image.jpg"
     natural_like_image().save(image_path, format="JPEG", quality=90)

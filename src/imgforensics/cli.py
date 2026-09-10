@@ -44,6 +44,7 @@ from imgforensics.eval.preprocess import AugmentationConfig
 from imgforensics.eval.records import ScoreRecord
 from imgforensics.eval.robustness import RobustnessSuite
 from imgforensics.eval.runner import BenchmarkConfig, BenchmarkResult, run_benchmark
+from imgforensics.fusion.evaluate import evaluate_fuser
 from imgforensics.fusion.explain_report import ReportPaths, build_report
 from imgforensics.fusion.report import explain
 from imgforensics.fusion.stacking import Fuser, fit_fuser
@@ -1298,6 +1299,82 @@ def fusion_info(
             name, f"{fitted.logit_weights[index]:.4f}", f"{fitted.presence_weights[index]:.4f}"
         )
     console.print(weights_table)
+
+
+@fusion_app.command("eval")
+def fusion_eval(
+    records_paths: Annotated[
+        list[Path],
+        typer.Argument(
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help="BenchmarkResult JSON file(s), as written by 'imgforensics benchmark --out'.",
+        ),
+    ],
+    fuser: Annotated[
+        Path | None,
+        typer.Option(
+            "--fuser",
+            help=(
+                "fuser.json to evaluate. "
+                f"Default: ${_FUSER_PATH_ENV}, else {_DEFAULT_FUSER_PATH} if it exists."
+            ),
+        ),
+    ] = None,
+    level: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--level",
+            help="Robustness level to report (repeatable). Default: every level present.",
+        ),
+    ] = None,
+    threshold: Annotated[
+        float,
+        typer.Option("--threshold", help="Operating threshold for balanced accuracy, FPR and TPR."),
+    ] = 0.5,
+    report: Annotated[
+        Path | None,
+        typer.Option("--report", help="Path to write the Markdown report to; stdout when omitted."),
+    ] = None,
+    json_out: Annotated[
+        Path | None,
+        typer.Option("--json", help="Path to write the evaluation as JSON to."),
+    ] = None,
+) -> None:
+    """Evaluate a fitted fuser: each detector alone, fused, and fused outside the abstain band."""
+    fuser_path = _resolve_fuser_path(fuser)
+    if fuser_path is None:
+        raise typer.BadParameter(
+            f"No fuser found: pass --fuser, set ${_FUSER_PATH_ENV}, or fit {_DEFAULT_FUSER_PATH}."
+        )
+    if not fuser_path.is_file():
+        raise typer.BadParameter(f"Fuser file not found: {fuser_path}")
+    loaded_fuser = Fuser.load(fuser_path)
+
+    records: list[ScoreRecord] = []
+    for records_path in records_paths:
+        records.extend(BenchmarkResult.load_json(records_path).records)
+
+    try:
+        evaluation = evaluate_fuser(
+            loaded_fuser, records, levels=level or None, threshold=threshold
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    markdown_report = evaluation.to_markdown()
+    if report is not None:
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(markdown_report, encoding="utf-8")
+        console.print(f"Wrote report to {report}")
+    else:
+        console.print(Markdown(markdown_report))
+
+    if json_out is not None:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        json_out.write_text(json.dumps(evaluation.to_dict(), indent=2), encoding="utf-8")
+        console.print(f"Wrote {json_out}")
 
 
 if __name__ == "__main__":

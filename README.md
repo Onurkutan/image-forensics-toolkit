@@ -450,7 +450,14 @@ stacking model (no scikit-learn, no torch) fitted on saved benchmark records:
 imgforensics benchmark manifest.jsonl --all-signals --out results.json --robustness none
 imgforensics fusion fit results.json --out weights/fuser.json
 imgforensics analyze image.jpg --fuser weights/fuser.json   # or set IMGFORENSICS_FUSER
+imgforensics fusion eval results.json --fuser weights/fuser.json --report eval.md
 ```
+
+`fusion eval` reports, per robustness level, each detector's own AUC / balanced accuracy /
+FPR / TPR alone, the same numbers for the fused verdict over every image, and again over just
+the images the fuser is willing to call (outside the abstain band, with the abstain rate) --
+the table [docs/benchmarks/04_fusion_wildrf.md](docs/benchmarks/04_fusion_wildrf.md) reports,
+now reproducible from a fitted fuser and saved benchmark results instead of an ad-hoc script.
 
 Each detector's score is imputed as abstaining (0.5) when it did not run, so
 a fuser degrades gracefully with a subset of its detectors present; a "real
