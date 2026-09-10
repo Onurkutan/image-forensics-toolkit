@@ -524,6 +524,54 @@ is named -- `analyze image.jpg --detector luminance_gradient` -- and `imgforensi
 refuses them outright, there being no verdict to score. `--save-heatmaps` and `--report-dir`
 treat a named view like any other tool.
 
+## API (optional `api` extra)
+
+`imgforensics.api` is HTTP over the service layer and nothing more: one FastAPI application
+whose routes map straight onto `catalogue()`, `AnalysisSession` and `SessionStore`, with JSON
+for the numbers and PNG for the pixels. It is what the web client in
+[docs/design/01_toolbox_architecture.md](docs/design/01_toolbox_architecture.md) talks to.
+
+```bash
+pip install -e ".[api]"
+imgforensics serve --host 127.0.0.1 --port 8000    # interactive schema at /docs
+```
+
+| Method | Path | What it does |
+|---|---|---|
+| GET | `/health` | `status` and the version whose contract this server speaks |
+| GET | `/tools` | the catalogue: every tool with its parameters and its `installed` flag |
+| POST | `/sessions` | upload one image (multipart field `file`), get a session id |
+| GET | `/sessions/{id}` | the image's size and format, and the tools run so far |
+| POST | `/sessions/{id}/tools/{name}` | run a tool with `{"parameters": {...}}`, get its result and its map URLs |
+| GET | `/sessions/{id}/maps/{name}/{map}/{z}/{x}/{y}.png` | one 256-pixel tile of a map, as 8-bit grayscale PNG |
+| GET | `/sessions/{id}/fusion` | the fused verdict, when a fuser is configured |
+| GET | `/sessions/{id}/report.zip` | the explanation report folder, zipped |
+
+```bash
+BASE=http://127.0.0.1:8000
+SESSION=$(curl -sF file=@image.jpg $BASE/sessions | python -c "import json,sys; print(json.load(sys.stdin)['id'])")
+
+# run a tool: the response carries the score, the details, and a tile URL per map
+curl -s -X POST $BASE/sessions/$SESSION/tools/ela \
+  -H 'Content-Type: application/json' -d '{"parameters": {"quality": 80}}'
+
+# fetch the top-left tile of that run's heatmap at full resolution
+curl -s -o tile.png $BASE/sessions/$SESSION/maps/ela/heatmap/0/0/0.png
+```
+
+A tile URL names a tool and a map, never the parameters: it serves the map of the run that
+tool last made in the session, so re-running it with a new setting leaves a viewer's tile URLs
+valid. An unknown session, an expired one or an unregistered tool is a 404; a parameter the
+tool refuses or a tile outside its level is a 422, carrying the message the service wrote.
+
+`--fuser` picks the fuser for the fused-verdict route (`$IMGFORENSICS_FUSER` and then
+`weights/fuser.json` are the fallbacks, as for `analyze`); without one, that route is a 404 and
+everything else works. Two caveats worth stating plainly: **there is no authentication**, and
+**sessions are in-memory** -- they live in one process behind a TTL (`--ttl-seconds`) and a
+population cap (`--max-sessions`), so a restart loses them and two replicas do not share them.
+The default binding is loopback for that reason; anything reachable from a network wants a
+reverse proxy in front of it.
+
 ## Roadmap
 
 See [docs/ROADMAP.md](docs/ROADMAP.md). Step-by-step runbooks for individual

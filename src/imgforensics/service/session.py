@@ -286,10 +286,32 @@ class AnalysisSession:
             this result actually carries -- an empty dict for a tool that
             produced neither.
         """
-        result = self.run(tool, parameters)
-        key = self._latest[tool]
+        self.run(tool, parameters)
+        return self._pyramids(self._latest[tool])
+
+    def latest_maps(self, tool: str) -> dict[str, MapPyramid]:
+        """The maps of the parameters ``tool`` last ran with, without running anything.
+
+        What a tile request needs. A tile is addressed by tool and map name
+        only -- putting the parameters in a tile URL would make every slider
+        move invalidate a viewer's whole tile cache -- so the map it serves is
+        the one belonging to the run the client was last shown. A tool that
+        has not run here has no such map, and saying so is more use to the
+        caller than quietly running it with its defaults.
+
+        Raises:
+            KeyError: if ``tool`` has not run in this session.
+        """
+        key = self._latest.get(tool)
+        if key is None:
+            raise KeyError(f"Tool {tool!r} has not run in this session")
+        return self._pyramids(key)
+
+    def _pyramids(self, key: _CallKey) -> dict[str, MapPyramid]:
+        """One call's maps as pyramids, built on first request and then kept."""
         pyramids = self._maps.get(key)
         if pyramids is None:
+            result = self._results[key]
             pyramids = {
                 map_name: MapPyramid(array)
                 for map_name in MAP_NAMES

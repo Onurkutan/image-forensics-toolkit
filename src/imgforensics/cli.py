@@ -54,6 +54,11 @@ from imgforensics.localization import (  # also registers the iml_vit localizer
     fetch_weights,
     weights_file,
 )
+from imgforensics.service.session import (
+    DEFAULT_MAX_SESSIONS,
+    DEFAULT_TTL_SECONDS,
+    SessionStore,
+)
 from imgforensics.signals import SIGNAL_NAMES  # also registers all seven signal detectors
 from imgforensics.utils.image_io import image_hash
 from imgforensics.utils.jsonsafe import to_jsonable
@@ -354,6 +359,60 @@ def analyze(
 def version() -> None:
     """Print the installed imgforensics version."""
     console.print(__version__)
+
+
+@app.command()
+def serve(
+    host: Annotated[
+        str, typer.Option("--host", help="Interface to bind to; loopback by default.")
+    ] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", help="Port to listen on.", min=1)] = 8000,
+    fuser: Annotated[
+        Path | None,
+        typer.Option(
+            "--fuser",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help=(
+                "Fitted fuser for the fused-verdict route "
+                f"(default: ${_FUSER_PATH_ENV}, then {_DEFAULT_FUSER_PATH} if it exists)."
+            ),
+        ),
+    ] = None,
+    ttl_seconds: Annotated[
+        float,
+        typer.Option("--ttl-seconds", help="How long an idle session survives.", min=1),
+    ] = DEFAULT_TTL_SECONDS,
+    max_sessions: Annotated[
+        int,
+        typer.Option("--max-sessions", help="How many sessions may exist at once.", min=1),
+    ] = DEFAULT_MAX_SESSIONS,
+) -> None:
+    """Serve the JSON API a workbench client talks to (needs the optional 'api' extra).
+
+    Sessions live in this process's memory and nothing here authenticates
+    anybody, which is why the default binding is loopback: an instance
+    reachable from a network needs a reverse proxy that provides both.
+    """
+    try:
+        import uvicorn
+
+        from imgforensics.api import create_app
+    except ImportError as exc:
+        console.print(
+            "[red]The 'api' extra (fastapi, uvicorn) is not installed, so there is no "
+            "server to run.[/red]\n"
+            # Escaped, or rich would read the extra's brackets as a style tag.
+            f"""Install it with: {escape('pip install "imgforensics[api]"')}  """
+            '(see the README section "API").'
+        )
+        raise typer.Exit(code=1) from exc
+
+    store = SessionStore(ttl_seconds=ttl_seconds, max_sessions=max_sessions)
+    api = create_app(store=store, fuser_path=fuser)
+    console.print(f"Serving the imgforensics API on http://{host}:{port} (schema at /docs)")
+    uvicorn.run(api, host=host, port=port)
 
 
 @app.command()
@@ -748,10 +807,12 @@ def weights_fetch(
 def _require_ml() -> None:
     """Exit with a clear message when the optional ``ml`` extra is missing."""
     if not detectors.is_ml_available():
+        # Escaped, or rich would read the extra's brackets as a style tag.
+        install = escape('pip install -e ".[ml]"')
         console.print(
             "[red]The 'ml' extra (torch, timm) is not installed, so features cannot be "
             "extracted.[/red]\n"
-            'Install it with: pip install -e ".[ml]"  '
+            f"Install it with: {install}  "
             "(add --index-url https://download.pytorch.org/whl/cu130 for a CUDA build; "
             'see the README section "Learned detectors").'
         )
