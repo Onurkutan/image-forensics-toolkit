@@ -9,6 +9,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 
 Label = Literal["real", "fake", "uncertain"]
 
+#: What a registered tool is, for a caller that groups them or decides which
+#: ones to run: a classical low-level ``signal``, an image-level ``detector``,
+#: a pixel-level ``localizer``, or a ``view`` -- a map shown on every image
+#: that claims no verdict at all (see :mod:`imgforensics.views`).
+ToolKind = Literal["signal", "detector", "localizer", "view"]
+
 
 class DetectionResult(BaseModel):
     """Result of running a single detector on a single image.

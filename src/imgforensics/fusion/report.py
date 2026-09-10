@@ -4,13 +4,21 @@
 and a live ``{detector: score}`` dict into a ranked list of
 :class:`Contribution` objects, so the CLI (and any other caller) can show
 *why* the fused probability came out the way it did, not just the number.
+
+:func:`fusion_payload` is the shape that goes over the wire: the probability,
+the label, the abstain band and those contributions as one JSON-ready dict.
+The CLI's ``--fuser`` panel, the report builder's fusion block and the service
+layer all render it, which is what keeps the fused verdict identical however a
+caller asks for it.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
+from imgforensics.core.types import DetectionResult
 from imgforensics.fusion.stacking import Fuser, logit_from_score
 
 #: One-line, plain-language description of what each detector actually
@@ -30,6 +38,12 @@ DETECTOR_NOTES: dict[str, str] = {
     ),
     "iml_vit": "IML-ViT pixel-level manipulation localization, reduced to an image score",
     "catnet_v2": "CAT-Net v2 compression-aware localization, reduced to an image score",
+    "localizer_ensemble": "IML-ViT and CAT-Net v2's heatmaps combined pixelwise",
+    # The views (imgforensics.views) claim no verdict, so their notes say what
+    # the map shows and stop there.
+    "luminance_gradient": "map of how sharply brightness changes, pixel by pixel",
+    "noise_residual": "map of what is left of the luma after a local median filter",
+    "bit_planes": "one bit of the 8-bit luma image shown on its own",
 }
 
 #: Shown for a detector name not in :data:`DETECTOR_NOTES` (a custom, future,
@@ -87,3 +101,37 @@ def explain(fuser: Fuser, scores: Mapping[str, float]) -> list[Contribution]:
         )
     contributions.sort(key=lambda contribution: abs(contribution.contribution), reverse=True)
     return contributions
+
+
+def fusion_payload(fuser: Fuser, results: Sequence[DetectionResult]) -> dict[str, Any]:
+    """The fused verdict for one run of several detectors, as a JSON-ready dict.
+
+    Args:
+        fuser: A fitted fuser.
+        results: Every detector's result from this run. A detector the fuser
+            was fitted on but that did not run is imputed as abstaining, the
+            same way :meth:`Fuser.predict` does, and one that ran but is not
+            in the fuser is simply not part of the verdict.
+
+    Returns:
+        ``probability``, ``label``, the abstain ``band``, and one entry per
+        fitted detector under ``contributions`` (see :func:`explain`), ordered
+        by how much each moved the verdict.
+    """
+    scores = {result.detector: result.score for result in results}
+    return {
+        "probability": fuser.predict(scores),
+        "label": fuser.predict_label(scores),
+        "band": {"low": fuser.band.low, "high": fuser.band.high},
+        "contributions": [
+            {
+                "detector": contribution.detector,
+                "score": contribution.score,
+                "weight": contribution.weight,
+                "contribution": contribution.contribution,
+                "present": contribution.present,
+                "note": contribution.note,
+            }
+            for contribution in explain(fuser, scores)
+        ],
+    }

@@ -235,6 +235,11 @@ class JPEGGhostSignal(BaseDetector):
 
     name = "jpeg_ghost"
 
+    # No declared parameters yet (:meth:`BaseDetector.parameters`): the one
+    # argument this signal takes is a quality *range*, which needs three
+    # numbers (start, stop, step) behind a single control. ParameterSpec
+    # describes one scalar per entry, so a range parameter is a refinement of
+    # a ParameterSpec rather than something to fake with three loose integers.
     def __init__(self, qualities: tuple[int, ...] = _QUALITIES) -> None:
         self.qualities = qualities
 

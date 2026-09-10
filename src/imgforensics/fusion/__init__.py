@@ -2,7 +2,7 @@
 
 from imgforensics.fusion.evaluate import EvalRow, FusionEvaluation, evaluate_fuser
 from imgforensics.fusion.explain_report import ReportPaths, build_report
-from imgforensics.fusion.report import Contribution, explain
+from imgforensics.fusion.report import Contribution, explain, fusion_payload
 from imgforensics.fusion.stacking import (
     Band,
     FitInfo,
@@ -26,4 +26,5 @@ __all__ = [
     "evaluate_fuser",
     "explain",
     "fit_fuser",
+    "fusion_payload",
 ]

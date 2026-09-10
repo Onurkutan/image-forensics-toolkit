@@ -17,6 +17,7 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
+import imgforensics.views  # noqa: F401  (side effect: registers the three view tools)
 from imgforensics import __version__, detectors
 from imgforensics.core import registry
 from imgforensics.core.image import ForensicImage
@@ -46,7 +47,7 @@ from imgforensics.eval.robustness import RobustnessSuite
 from imgforensics.eval.runner import BenchmarkConfig, BenchmarkResult, run_benchmark
 from imgforensics.fusion.evaluate import evaluate_fuser
 from imgforensics.fusion.explain_report import ReportPaths, build_report
-from imgforensics.fusion.report import explain
+from imgforensics.fusion.report import fusion_payload
 from imgforensics.fusion.stacking import Fuser, fit_fuser
 from imgforensics.localization import (  # also registers the iml_vit localizer
     WEIGHTS,
@@ -105,30 +106,6 @@ def _resolve_fuser_path(explicit: Path | None) -> Path | None:
 _TOP_CONTRIBUTIONS_SHOWN = 5
 
 
-def _fusion_payload(fuser_model: Fuser, results: list[DetectionResult]) -> dict[str, Any]:
-    """The fused verdict for one ``analyze`` run: probability, label, band, and contributions."""
-    scores = {result.detector: result.score for result in results}
-    probability = fuser_model.predict(scores)
-    label = fuser_model.predict_label(scores)
-    contributions = explain(fuser_model, scores)
-    return {
-        "probability": probability,
-        "label": label,
-        "band": {"low": fuser_model.band.low, "high": fuser_model.band.high},
-        "contributions": [
-            {
-                "detector": contribution.detector,
-                "score": contribution.score,
-                "weight": contribution.weight,
-                "contribution": contribution.contribution,
-                "present": contribution.present,
-                "note": contribution.note,
-            }
-            for contribution in contributions
-        ],
-    }
-
-
 def _print_fusion_panel(fusion: dict[str, Any]) -> None:
     contributions_table = Table(show_header=True, box=None)
     contributions_table.add_column("detector", style="bold")
@@ -175,10 +152,21 @@ def _save_heatmap(
     return out_path
 
 
+def _is_view(name: str) -> bool:
+    return registry.get(name).kind == "view"
+
+
 def _resolve_detector_names(selected: list[str] | None) -> list[str]:
+    """The detectors ``analyze`` runs: everything but the views, or exactly what was asked for.
+
+    A view (:mod:`imgforensics.views`) reports 0.5/"uncertain" on every image
+    by design, so running all of them by default would add one uninformative
+    card per view to every run. They stay one ``--detector luminance_gradient``
+    away.
+    """
     available_names = registry.available()
     if not selected:
-        return available_names
+        return [name for name in available_names if not _is_view(name)]
     unknown = [name for name in selected if name not in available_names]
     if unknown:
         raise typer.BadParameter(
@@ -273,7 +261,7 @@ def analyze(
         heatmap_paths[name] = saved_path
         attribution_paths[name] = saved_attribution
 
-    fusion_payload = _fusion_payload(loaded_fuser, results) if loaded_fuser is not None else None
+    fusion = fusion_payload(loaded_fuser, results) if loaded_fuser is not None else None
 
     report_paths: ReportPaths | None = None
     if report_dir is not None:
@@ -311,8 +299,8 @@ def analyze(
                 for result in results
             ],
         }
-        if fusion_payload is not None:
-            document["fusion"] = to_jsonable(fusion_payload)
+        if fusion is not None:
+            document["fusion"] = to_jsonable(fusion)
         if report_paths is not None:
             document["report_dir"] = str(report_paths.out_dir)
         typer.echo(json.dumps(document, indent=2))
@@ -355,8 +343,8 @@ def analyze(
         )
         console.print(panel)
 
-    if fusion_payload is not None:
-        _print_fusion_panel(fusion_payload)
+    if fusion is not None:
+        _print_fusion_panel(fusion)
 
     if report_paths is not None:
         console.print(f"Report written to {report_paths.out_dir}")
@@ -459,6 +447,12 @@ def benchmark(
         raise typer.BadParameter(
             f"Unknown detector(s): {', '.join(unknown)}. "
             f"Available: {', '.join(registry.available()) or '<none>'}"
+        )
+    selected_views = sorted(name for name in names if _is_view(name))
+    if selected_views:
+        raise typer.BadParameter(
+            f"Cannot benchmark {', '.join(selected_views)}: views carry no score, only a map. "
+            "Open one with: imgforensics analyze IMAGE --detector NAME"
         )
     if not names and not baselines:
         raise typer.BadParameter(

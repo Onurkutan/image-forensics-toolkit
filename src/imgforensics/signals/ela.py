@@ -10,10 +10,16 @@ from PIL import Image
 
 from imgforensics.core.base import BaseDetector
 from imgforensics.core.image import ForensicImage
+from imgforensics.core.parameters import ParameterSpec
 from imgforensics.core.registry import register
 from imgforensics.core.types import DetectionResult, label_from_score
 
 DEFAULT_QUALITY = 95
+
+#: Range offered for the re-encoding quality. Below 50 the re-save error
+#: swamps the whole image and the map stops separating regions; above 100
+#: there is no quality left to ask for.
+_QUALITY_RANGE = (50, 100)
 
 
 def _diff_max(rgb: Image.Image, quality: int) -> np.ndarray:
@@ -106,6 +112,25 @@ class ELASignal(BaseDetector):
 
     def __init__(self, quality: int = DEFAULT_QUALITY) -> None:
         self.quality = quality
+
+    @classmethod
+    def parameters(cls) -> list[ParameterSpec]:
+        minimum, maximum = _QUALITY_RANGE
+        return [
+            ParameterSpec(
+                name="quality",
+                kind="int",
+                default=DEFAULT_QUALITY,
+                minimum=minimum,
+                maximum=maximum,
+                step=1,
+                description=(
+                    "JPEG quality the image is re-encoded at before the difference is taken. "
+                    "Sweeping it is how ELA is read: a region that was last saved at some "
+                    "other quality stands out most when the re-save matches that quality."
+                ),
+            )
+        ]
 
     def predict(self, image: ForensicImage) -> DetectionResult:
         diff_max = _diff_max(image.rgb, self.quality)

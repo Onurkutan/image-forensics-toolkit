@@ -23,8 +23,12 @@ Level Analysis with heatmap), `c2pa` (C2PA manifest verification),
   manipulated or AI-inpainted regions with a heatmap.
 - **Signals** (`imgforensics.signals`): classical low-level signal analyzers such as noise
   residuals, error level analysis, and JPEG artifact statistics.
+- **Views** (`imgforensics.views`): maps that render the image under one transform and claim
+  no verdict, for a person to read.
 - **Fusion** (`imgforensics.fusion`): combines detector and localizer outputs into a single
   image-level score with an explanation.
+- **Service** (`imgforensics.service`): the headless session layer -- tool catalogue,
+  parameters, cached results, map tiles -- an interactive client talks to.
 
 ## Quickstart
 
@@ -66,7 +70,9 @@ image-forensics-toolkit/
 │   ├── detectors/       # image-level detectors
 │   ├── localization/    # pixel-level localizers
 │   ├── signals/         # classical low-level signals
+│   ├── views/           # maps that show, without claiming a verdict
 │   ├── fusion/          # score fusion and explanation
+│   ├── service/         # headless session layer for an interactive client
 │   ├── data/            # dataset loaders and download helpers
 │   ├── utils/           # image I/O helpers
 │   └── cli.py           # command-line interface
@@ -470,6 +476,48 @@ held-out split so the fuser can say "not sure" instead of guessing.
 with every detector's score, label and details plus the fused verdict when a fuser is configured,
 `<detector>_heatmap.png` and `<detector>_overlay.png` for every detector that produced a heatmap,
 and `report.md` with one plain-language card per detector, the fused verdict first.
+
+## Service layer (Phase 6a)
+
+`imgforensics.service` is the headless layer an interactive client sits on -- the forensic
+workbench described in
+[docs/design/01_toolbox_architecture.md](docs/design/01_toolbox_architecture.md). It computes
+no forensics of its own: it holds the state a one-shot command does not need. `catalogue()`
+lists every registered tool with its category, kind, parameters and whether its weights are
+installed (answered without importing torch), so a client can draw a tool tree before running
+anything. `AnalysisSession` loads one image once and runs tools on it lazily, caching each
+result under the parameters it was produced with, and serves each map as a `MapPyramid` --
+levels down to 256 px, 256-pixel tiles on request -- so a 12-megapixel heatmap never crosses
+the wire whole. `SessionStore` keeps sessions in memory with a TTL and a cap, so a public
+demo needs no database.
+
+```python
+from imgforensics.core.image import ForensicImage
+from imgforensics.service import AnalysisSession, catalogue
+
+print([tool.name for tool in catalogue() if tool.installed])
+session = AnalysisSession(ForensicImage.from_path("image.jpg"), name="image.jpg")
+result = session.run("ela", {"quality": 80})  # cached per (tool, parameters)
+tile = session.maps("ela")["heatmap"].tile(level=0, x=0, y=0)
+```
+
+Tools that take a user-facing setting declare it as a `ParameterSpec` (name, type, range,
+default, description) and accept it as a constructor keyword argument: `ela.quality`,
+`localizer_ensemble.mode` and `dinov2_head.attribution` so far. Deployment settings -- a
+device, a weights directory -- are deliberately not parameters.
+
+### Views
+
+A view renders the image under one transform and claims nothing: score 0.5, label
+`uncertain`, `details["kind"] = "view"`, and the map as its heatmap. Three of them:
+`luminance_gradient` (Sobel gradient magnitude of the luma, with an optional pre-blur
+`radius`), `noise_residual` (luma minus its local median, `window` 3 or 5) and `bit_planes`
+(one bit of the 8-bit luma, `plane` 0-7). They are pure numpy/Pillow and need no extra.
+
+Because a 0.5 card on every image is noise, `imgforensics analyze` skips the views unless one
+is named -- `analyze image.jpg --detector luminance_gradient` -- and `imgforensics benchmark`
+refuses them outright, there being no verdict to score. `--save-heatmaps` and `--report-dir`
+treat a named view like any other tool.
 
 ## Roadmap
 

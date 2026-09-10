@@ -78,7 +78,7 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 from PIL import Image
@@ -86,7 +86,7 @@ from PIL import Image
 from imgforensics.core.base import BaseDetector
 from imgforensics.core.image import ForensicImage
 from imgforensics.core.registry import register
-from imgforensics.core.types import DetectionResult, label_from_score
+from imgforensics.core.types import DetectionResult, ToolKind, label_from_score
 from imgforensics.data.acquire import _sha256_of_file
 from imgforensics.localization._jpegcoef import (
     JpegCoefficients,
@@ -257,6 +257,7 @@ class CATNetLocalizer(BaseDetector):
     """
 
     name = "catnet_v2"
+    kind: ClassVar[ToolKind] = "localizer"
 
     def __init__(self, weights_dir: str | Path | None = None, device: str = "auto") -> None:
         """Point the localizer at a weights directory (nothing is read yet).

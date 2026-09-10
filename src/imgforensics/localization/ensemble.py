@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from typing import Any, Literal, cast, get_args
+from typing import Any, ClassVar, Literal, cast, get_args
 
 import numpy as np
 from PIL import Image
@@ -61,8 +61,9 @@ from PIL import Image
 from imgforensics.core import registry
 from imgforensics.core.base import BaseDetector
 from imgforensics.core.image import ForensicImage
+from imgforensics.core.parameters import ParameterSpec
 from imgforensics.core.registry import register
-from imgforensics.core.types import DetectionResult, label_from_score
+from imgforensics.core.types import DetectionResult, ToolKind, label_from_score
 from imgforensics.localization._scoring import top_fraction_score
 
 #: How the member heatmaps are combined. See the module docstring.
@@ -212,6 +213,36 @@ class LocalizerEnsemble(BaseDetector):
     """
 
     name = "localizer_ensemble"
+    kind: ClassVar[ToolKind] = "localizer"
+
+    @classmethod
+    def parameters(cls) -> list[ParameterSpec]:
+        """The combination mode, as a choice over :data:`MODES`.
+
+        The declared default is whatever the constructor would pick on its
+        own -- :data:`MODE_ENV` when it is set, :data:`DEFAULT_MODE`
+        otherwise -- so a deployment that switches the mode through the
+        environment sees that mode offered as the default rather than being
+        silently overridden by a caller who accepted "the default".
+
+        ``members`` and ``device`` are not offered: the first is the
+        ensemble's own composition rather than a reading of the image, and
+        the second says where the models run.
+        """
+        return [
+            ParameterSpec(
+                name="mode",
+                kind="choice",
+                default=resolve_mode(),
+                choices=list(MODES),
+                description=(
+                    "How the member heatmaps are combined: 'mean' keeps both members' "
+                    "calibration, 'max' takes whichever member is more confident per pixel, "
+                    "'rank_mean' equalizes members on different scales but discards their "
+                    "calibration, so a 0.5 threshold stops meaning anything under it."
+                ),
+            )
+        ]
 
     def __init__(
         self,

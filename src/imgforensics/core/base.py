@@ -5,9 +5,11 @@ from __future__ import annotations
 import abc
 import time
 from collections.abc import Sequence
+from typing import ClassVar
 
 from imgforensics.core.image import ForensicImage
-from imgforensics.core.types import DetectionResult
+from imgforensics.core.parameters import ParameterSpec
+from imgforensics.core.types import DetectionResult, ToolKind
 
 
 class BaseDetector(abc.ABC):
@@ -20,9 +22,35 @@ class BaseDetector(abc.ABC):
     otherwise manipulated (0 = confidently real, 1 = confidently fake).
     Subclasses must set the ``name`` class attribute and implement
     :meth:`predict`.
+
+    Two class-level declarations describe the tool to a caller that has not
+    built it yet -- a catalogue, a benchmark that skips some kinds, a UI that
+    draws controls (:mod:`imgforensics.service.catalogue`):
+
+    - :attr:`kind` says what sort of tool this is; it defaults to ``"signal"``
+      because that is what most of them are.
+    - :meth:`parameters` lists the settings a user may change. A tool that
+      declares a parameter must accept it as a constructor keyword argument
+      of the same name and with the same default, so that building the tool
+      from a declared parameter dict and building it with no arguments at all
+      agree on what happens.
     """
 
     name: str
+
+    #: What sort of tool this is; see :data:`~imgforensics.core.types.ToolKind`.
+    kind: ClassVar[ToolKind] = "signal"
+
+    @classmethod
+    def parameters(cls) -> list[ParameterSpec]:
+        """The user-facing settings this tool accepts, in display order.
+
+        The default is none: a tool whose behaviour a user cannot usefully
+        change from a control panel declares nothing, and deployment settings
+        (a device, a weights directory) are not parameters in this sense --
+        they say where the tool runs, not what it measures.
+        """
+        return []
 
     def load(self, device: str = "cpu") -> None:
         """Load any resources (weights, models) needed for inference.

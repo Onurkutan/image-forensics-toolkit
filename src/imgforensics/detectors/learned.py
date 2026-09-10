@@ -42,14 +42,15 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 
 from imgforensics.core.base import BaseDetector
 from imgforensics.core.image import ForensicImage
+from imgforensics.core.parameters import ParameterSpec
 from imgforensics.core.registry import register
-from imgforensics.core.types import DetectionResult, label_from_score
+from imgforensics.core.types import DetectionResult, ToolKind, label_from_score
 from imgforensics.detectors.crops import CropBox, crop_boxes
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing only, never at runtime
@@ -123,6 +124,32 @@ class LearnedDetector(BaseDetector):
     """
 
     name = "dinov2_head"
+    kind: ClassVar[ToolKind] = "detector"
+
+    @classmethod
+    def parameters(cls) -> list[ParameterSpec]:
+        """Whether to paint the Grad-CAM attribution map alongside the heatmap.
+
+        The declared default is what the constructor would pick on its own --
+        :data:`HEAD_ATTRIBUTION_ENV` when it is set, on otherwise -- so a
+        deployment that switches attribution off through the environment sees
+        it offered as off rather than being turned back on by a caller who
+        accepted "the default". ``checkpoint_dir`` is not offered: which
+        checkpoint is installed is a deployment setting, not a reading of the
+        image.
+        """
+        return [
+            ParameterSpec(
+                name="attribution",
+                kind="bool",
+                default=resolve_attribution(),
+                description=(
+                    "Also compute the Grad-CAM map showing where inside the scored crops "
+                    "the head looked. Costs one extra forward and backward pass over those "
+                    "crops; the score, label and heatmap are the same either way."
+                ),
+            )
+        ]
 
     def __init__(
         self,

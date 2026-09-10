@@ -67,7 +67,8 @@ client                 web SPA (recommended) or desktop app, talking JSON + PNG 
   demand. Sessions are in-memory with a TTL, so a public demo needs no database.
 - `views`: tools of kind `view` return a map and no score (score 0.5, label `uncertain`,
   `details["kind"] = "view"`), are excluded from fusion by construction (the fuser lists
-  its detectors explicitly) and skipped by the benchmark runner unless asked for. They
+  its detectors explicitly), skipped by the default `analyze` run and refused by
+  `benchmark` (there is no score to benchmark). They
   are what makes the workbench a workbench: luminance gradient, noise residual, bit
   planes and the like show *something* on every image without claiming a verdict.
 

@@ -34,7 +34,7 @@ from PIL import Image
 from imgforensics import __version__
 from imgforensics.core.image import ForensicImage
 from imgforensics.core.types import DetectionResult
-from imgforensics.fusion.report import DETECTOR_NOTES, GENERIC_NOTE, explain
+from imgforensics.fusion.report import DETECTOR_NOTES, GENERIC_NOTE, fusion_payload
 from imgforensics.fusion.stacking import Band, Fuser
 from imgforensics.utils.image_io import image_hash
 from imgforensics.utils.jsonsafe import to_jsonable
@@ -264,29 +264,6 @@ class ReportPaths:
     attribution_paths: dict[str, Path]
 
 
-def _fusion_block(fuser: Fuser, results: Sequence[DetectionResult]) -> dict[str, Any]:
-    scores = {result.detector: result.score for result in results}
-    probability = fuser.predict(scores)
-    label = fuser.predict_label(scores)
-    contributions = explain(fuser, scores)
-    return {
-        "probability": probability,
-        "label": label,
-        "band": {"low": fuser.band.low, "high": fuser.band.high},
-        "contributions": [
-            {
-                "detector": contribution.detector,
-                "score": contribution.score,
-                "weight": contribution.weight,
-                "contribution": contribution.contribution,
-                "present": contribution.present,
-                "note": contribution.note,
-            }
-            for contribution in contributions
-        ],
-    }
-
-
 def build_report(
     image: ForensicImage,
     results: list[DetectionResult],
@@ -366,7 +343,7 @@ def build_report(
                 },
             }
 
-    fusion_block = _fusion_block(fuser, results) if fuser is not None else None
+    fusion_block = fusion_payload(fuser, results) if fuser is not None else None
 
     document: dict[str, Any] = {
         "image": {
