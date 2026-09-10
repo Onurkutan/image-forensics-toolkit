@@ -572,6 +572,41 @@ population cap (`--max-sessions`), so a restart loses them and two replicas do n
 The default binding is loopback for that reason; anything reachable from a network wants a
 reverse proxy in front of it.
 
+## Demo (optional `demo` extra)
+
+`imgforensics.demo` is one Gradio page over the same service layer -- the public stopgap of
+[docs/design/01_toolbox_architecture.md](docs/design/01_toolbox_architecture.md), section 4:
+a link anybody can open, deliberately thin, retired once the workbench client is deployed
+over the API.
+
+```bash
+pip install -e ".[demo]"
+imgforensics demo --host 127.0.0.1 --port 7860        # add --fuser weights/fuser.json
+```
+
+Upload an image, tick the tools, press Analyze. The page shows three things: a **summary**
+(the fused verdict with its abstain band first, then one score bar per tool, then the
+caveats -- every tool that abstained, with its reason, and every tool that failed, with its
+exception), a **gallery of overlays** drawn by the same code `analyze --report-dir` writes
+its PNGs with, and the **JSON** behind both. Views start unchecked because they claim no
+verdict; a tool whose weights are missing is listed and greyed out rather than hidden.
+`--tool NAME` (repeatable) narrows the list, and a tool that raises becomes an error card
+instead of taking the page down.
+
+One caveat. **Uploads longer than 2048 px on a side are downscaled** before analysis
+(`--max-side`), and the page says so when it happens: a public CPU deployment cannot run
+CAT-Net over a 12-megapixel photograph. The library itself never resizes, so
+`imgforensics analyze` reads the original pixels. The upload's own encoded file is what
+gets analyzed below that cap, so `metadata`, `c2pa` and the JPEG-history half of
+`double_jpeg` run there exactly as they would from the CLI; they are only lost once a very
+large upload crosses the cap and the analysis runs on shrunk pixels with no encoded original
+behind them, which the summary's caveats then name.
+
+[`spaces/`](spaces/) holds what a Hugging Face Space needs to run this page: the entry
+point, a `requirements.txt` that installs the project from git with the `ml`, `demo` and
+`provenance` extras, and a README covering the license-gated weight fetch, the research-only
+AI-generation head, and the CPU hardware note.
+
 ## Roadmap
 
 See [docs/ROADMAP.md](docs/ROADMAP.md). Step-by-step runbooks for individual

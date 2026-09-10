@@ -61,7 +61,10 @@ api = [
     "python-multipart>=0.0.9",
 ]
 demo = [
-    "gradio>=4",
+    # 4.44 is the floor the demo page is written against; the components it
+    # uses (tuple choices on a CheckboxGroup, a Gallery of captioned images)
+    # have been stable since then.
+    "gradio>=4.44",
 ]
 ml = [
     # 2.6 is the first release whose torch.serialization.safe_globals accepts

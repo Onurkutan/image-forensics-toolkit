@@ -1,0 +1,15 @@
+# Hugging Face Spaces installs this file with pip before starting app.py.
+#
+# Torch on a CPU Space: the default PyPI wheel is the CUDA build, several
+# gigabytes of driver code no CPU runtime can use. Uncomment the next line to
+# pull the CPU wheels instead; it is a global option, so it applies to the
+# whole file. It is a hint rather than the default because a GPU Space wants
+# the opposite.
+# --extra-index-url https://download.pytorch.org/whl/cpu
+#
+# One PEP 508 direct reference, extras included: pip accepts "name[extras] @ url"
+# and resolves the extras from the checked-out project's pyproject.toml.
+#   ml         -- torch, timm: the localizers and the AI-generation head
+#   demo       -- gradio: the page itself
+#   provenance -- c2pa-python: the C2PA manifest signal
+imgforensics[ml,demo,provenance] @ git+https://github.com/Onurkutan/image-forensics-toolkit

@@ -39,6 +39,10 @@ from imgforensics.data import (
     sample,
     split_by_group,
 )
+
+# The demo's gradio-free half, so that importing the one default it shares
+# with this command costs nothing on an install without the optional extra.
+from imgforensics.demo.core import DEFAULT_MAX_SIDE
 from imgforensics.detectors import BACKBONES, CropPolicy, FeatureCache, FeatureExtractor
 from imgforensics.detectors.features import extract_to_cache
 from imgforensics.eval.preprocess import AugmentationConfig
@@ -413,6 +417,79 @@ def serve(
     api = create_app(store=store, fuser_path=fuser)
     console.print(f"Serving the imgforensics API on http://{host}:{port} (schema at /docs)")
     uvicorn.run(api, host=host, port=port)
+
+
+@app.command()
+def demo(
+    host: Annotated[
+        str, typer.Option("--host", help="Interface to bind to; loopback by default.")
+    ] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", help="Port to listen on.", min=1)] = 7860,
+    fuser: Annotated[
+        Path | None,
+        typer.Option(
+            "--fuser",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help=(
+                "Fitted fuser for the fused verdict "
+                f"(default: ${_FUSER_PATH_ENV}, then {_DEFAULT_FUSER_PATH} if it exists)."
+            ),
+        ),
+    ] = None,
+    share: Annotated[
+        bool,
+        typer.Option(
+            "--share/--no-share",
+            help="Ask Gradio for a public tunnel URL. Off by default: it exposes this machine.",
+        ),
+    ] = False,
+    tool: Annotated[
+        list[str] | None,
+        typer.Option("--tool", help="Offer only these tools; repeatable. Default: all of them."),
+    ] = None,
+    max_side: Annotated[
+        int,
+        typer.Option(
+            "--max-side",
+            min=1,
+            help="Longest side an upload is analyzed at; larger ones are downscaled first.",
+        ),
+    ] = DEFAULT_MAX_SIDE,
+) -> None:
+    """Serve the public demo page (needs the optional 'demo' extra).
+
+    One upload, a tool list, a summary, the overlays and the JSON behind
+    them. It keeps nothing: an image lives in this process's memory for the
+    length of one run, and large uploads are downscaled first so that a
+    machine without a GPU can answer.
+    """
+    try:
+        # Imported here only to fail now rather than inside build_demo, so the
+        # message below is what a missing extra produces.
+        import gradio  # noqa: F401
+
+        from imgforensics.demo import DemoConfig
+        from imgforensics.demo.app import build_demo
+    except ImportError as exc:
+        console.print(
+            "[red]The 'demo' extra (gradio) is not installed, so there is no page to "
+            "serve.[/red]\n"
+            # Escaped, or rich would read the extra's brackets as a style tag.
+            f"""Install it with: {escape('pip install "imgforensics[demo]"')}  """
+            '(see the README section "Demo").'
+        )
+        raise typer.Exit(code=1) from exc
+
+    config = DemoConfig(
+        tools=_resolve_detector_names(tool) if tool else None,
+        fuser_path=fuser,
+        max_side=max_side,
+    )
+    page = build_demo(config)
+    console.print(f"Serving the imgforensics demo on http://{host}:{port}")
+    page.launch(server_name=host, server_port=port, share=share)
 
 
 @app.command()
