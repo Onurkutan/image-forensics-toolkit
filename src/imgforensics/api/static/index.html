@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=1280" />
+    <!--
+      The page loads nothing that is not this server's own, and it says so:
+      the only remote thing a forensic workbench should ever fetch is the
+      image the user chose, and that one never leaves the browser except as
+      the upload. blob: and data: are here because the original image is drawn
+      from the local file rather than fetched back from the server.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' blob: data:; style-src 'self'"
+    />
+    <title>imgforensics workbench</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <script type="module" src="/static/app.js"></script>
+  </head>
+  <body>
+    <header class="bar">
+      <h1>imgforensics</h1>
+      <span id="version" class="muted"></span>
+      <span class="spacer"></span>
+      <span id="session-facts" class="muted"></span>
+    </header>
+
+    <main class="layout">
+      <aside class="column tools">
+        <div class="upload">
+          <label class="button primary" for="file">Open image</label>
+          <input id="file" type="file" accept="image/*" class="visually-hidden" />
+        </div>
+        <nav id="tool-tree" class="tree" aria-label="Tools"></nav>
+      </aside>
+
+      <section class="canvas-area" id="canvas-area">
+        <p id="drop-hint" class="drop-hint">
+          Open an image, or drop one here. Tick a tool to put its map on the canvas.
+        </p>
+        <div id="panel-grid" class="panel-grid count-1"></div>
+        <div id="panel-strip" class="strip" hidden></div>
+        <p class="hints muted">
+          Wheel zooms, drag pans, double-click resets. Keys: + &minus; 0 and the arrows.
+        </p>
+      </section>
+
+      <aside class="column inspector">
+        <h2 id="tool-title">No tool selected</h2>
+        <p id="tool-note" class="note muted">Pick a tool on the left to see what it reads.</p>
+        <form id="parameters" class="parameters"></form>
+        <div class="row">
+          <button id="run" type="button" class="button primary" disabled>Run</button>
+          <span id="run-state" class="muted"></span>
+        </div>
+        <div id="result"></div>
+        <section id="fusion" class="card" hidden></section>
+        <button id="report" type="button" class="button" disabled>Download report</button>
+      </aside>
+    </main>
+
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+  </body>
+</html>

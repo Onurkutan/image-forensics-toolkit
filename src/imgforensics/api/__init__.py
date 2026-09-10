@@ -1,4 +1,4 @@
-"""The workbench's one JSON contract: HTTP over the service layer, and nothing else.
+"""The workbench: HTTP over the service layer, and the client that talks to it.
 
 The client described in ``docs/design/01_toolbox_architecture.md`` (section
 3.3) is a thin viewer -- it draws a tool tree, moves sliders, pans one shared
@@ -9,6 +9,14 @@ stop describing what the user sees. This package is the wire between the two:
 mapping of :mod:`imgforensics.service` -- the catalogue, a session, a tool
 run, a map tile, the fused verdict, the report -- with JSON for the numbers,
 PNG for the pixels, and no forensics of its own.
+
+The viewer itself ships here too, under ``static/``: plain HTML, CSS and
+ES-module JavaScript, no build step and no CDN (section 3.3, milestone 6d).
+``GET /`` returns that page and ``/static`` serves the rest, so one process
+and one URL give the whole workbench, a wheel carries it, and it works with
+no network beyond the server it came from. :func:`static_dir` says where
+those files are, for a deployment that would rather hand them to a web server
+than to this one.
 
 What it deliberately is not:
 
@@ -35,6 +43,6 @@ in another ASGI server is the same one call. The interactive schema at
 ``/docs`` is the client contract, generated from the routes themselves.
 """
 
-from imgforensics.api.app import create_app
+from imgforensics.api.app import create_app, static_dir
 
-__all__ = ["create_app"]
+__all__ = ["create_app", "static_dir"]

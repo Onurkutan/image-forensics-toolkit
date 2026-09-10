@@ -393,7 +393,7 @@ def serve(
         typer.Option("--max-sessions", help="How many sessions may exist at once.", min=1),
     ] = DEFAULT_MAX_SESSIONS,
 ) -> None:
-    """Serve the JSON API a workbench client talks to (needs the optional 'api' extra).
+    """Serve the workbench -- the web client and the JSON API under it (optional 'api' extra).
 
     Sessions live in this process's memory and nothing here authenticates
     anybody, which is why the default binding is loopback: an instance
@@ -415,7 +415,9 @@ def serve(
 
     store = SessionStore(ttl_seconds=ttl_seconds, max_sessions=max_sessions)
     api = create_app(store=store, fuser_path=fuser)
-    console.print(f"Serving the imgforensics API on http://{host}:{port} (schema at /docs)")
+    console.print(
+        f"Serving the imgforensics workbench on http://{host}:{port} (JSON schema at /docs)"
+    )
     uvicorn.run(api, host=host, port=port)
 
 

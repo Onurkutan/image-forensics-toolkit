@@ -533,11 +533,20 @@ for the numbers and PNG for the pixels. It is what the web client in
 
 ```bash
 pip install -e ".[api]"
-imgforensics serve --host 127.0.0.1 --port 8000    # interactive schema at /docs
+imgforensics serve --host 127.0.0.1 --port 8000    # workbench at /, schema at /docs
 ```
+
+`imgforensics serve` also serves the **workbench client** itself at `/`: a tool tree grouped by
+category, one shared pan/zoom across the original image and every open map (drawn from 256-pixel
+tiles, so a 12-megapixel heatmap costs a few PNGs instead of 48 MB), parameter sliders that
+re-run one tool 400 ms after they stop moving, per-tool and fused verdicts with the abstain band
+drawn on them, and the report download. It is plain HTML, CSS and ES-module JavaScript packaged
+inside `imgforensics.api` -- no build step, no Node, no CDN and no request to anywhere but this
+server, which is also all its Content-Security-Policy permits.
 
 | Method | Path | What it does |
 |---|---|---|
+| GET | `/` | the workbench client; its files are served from `/static` |
 | GET | `/health` | `status` and the version whose contract this server speaks |
 | GET | `/tools` | the catalogue: every tool with its parameters and its `installed` flag |
 | POST | `/sessions` | upload one image (multipart field `file`), get a session id |

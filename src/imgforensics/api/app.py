@@ -26,19 +26,28 @@ depends on:
   run that tool last made in this session, so moving a slider re-runs the tool
   and the very same tile URLs then return the new map -- see
   :meth:`~imgforensics.service.AnalysisSession.latest_maps`.
+
+One route translates nothing: ``GET /`` returns the workbench client, the
+plain HTML, CSS and ES modules under ``static/``, and ``/static`` serves the
+rest of them. Shipping the client inside the package is what makes
+``imgforensics serve`` one process and one URL rather than a server plus a
+Node toolchain, and it costs this module a mount and a file response.
 """
 
 from __future__ import annotations
 
 import io
+import mimetypes
 import re
 import tempfile
 import zipfile
+from importlib import resources
 from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel, Field
 
@@ -77,6 +86,34 @@ TILE_SIZE = MAX_LEVEL_SIDE
 #: Everything that may not appear in a downloaded file's name. That name is
 #: built from what somebody uploaded, and it goes back out in a header.
 _UNSAFE_IN_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+#: What the client's own files are served as. Registered explicitly because
+#: :mod:`mimetypes` answers from the registry on Windows, where ``.js`` is
+#: mapped by whatever last installed a script host -- and a browser refuses to
+#: execute a module it was told is ``text/plain``, which would leave the page
+#: blank on one machine and fine on the next.
+_WEB_MEDIA_TYPES = {".js": "text/javascript", ".css": "text/css", ".html": "text/html"}
+
+
+def _register_web_media_types() -> None:
+    """Pin the client's media types, whatever this machine's registry says."""
+    for suffix, media_type in _WEB_MEDIA_TYPES.items():
+        mimetypes.add_type(media_type, suffix)
+
+
+_register_web_media_types()
+
+
+def static_dir() -> Path:
+    """The directory the workbench client's files live in.
+
+    Located through :mod:`importlib.resources` rather than relative to
+    ``__file__``, because "where is this package's data" is exactly the
+    question, and it is one that has the same answer for a checkout and for an
+    installed wheel -- provided ``pyproject.toml`` keeps ``api/static/*`` in
+    its package data, which is what puts the files in the wheel at all.
+    """
+    return Path(str(resources.files("imgforensics.api").joinpath("static")))
 
 
 class RunRequest(BaseModel):
@@ -149,6 +186,20 @@ def create_app(
     def _handle_rejected(_request: Request, exc: Exception) -> JSONResponse:
         """A parameter or a tile the service refused: its message, as a 422."""
         return JSONResponse(status_code=_UNPROCESSABLE, content=_detail(exc))
+
+    static = static_dir()
+    app.mount("/static", StaticFiles(directory=static), name="static")
+
+    @app.get("/", include_in_schema=False, response_class=FileResponse)
+    def workbench() -> FileResponse:
+        """The workbench client: the one page this server is meant to be used from.
+
+        Kept out of the schema on purpose. ``/docs`` describes the JSON
+        contract, and an HTML page is not part of it -- a client that reads
+        the schema to find out what this server can do should find the routes
+        below and nothing else.
+        """
+        return FileResponse(static / "index.html", media_type="text/html")
 
     @app.get("/health")
     def health() -> dict[str, str]:
