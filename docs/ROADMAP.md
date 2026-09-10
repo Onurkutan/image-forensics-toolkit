@@ -1,6 +1,6 @@
 # Roadmap
 
-Last updated: 2026-09-09. This document turns the three literature surveys in
+Last updated: 2026-09-10. This document turns the three literature surveys in
 [`docs/research/`](research/) into an ordered build plan. It is a living document: each
 phase ends with a short results note appended to its section.
 
@@ -161,6 +161,14 @@ measured the same way from its first training run.
   see small inpainted regions; that is Phase 4's job). WildRF is held-out images of a
   distribution seen in training; the genuine cross-dataset tests (Synthbuster, ITW-SM) are
   pending. See [`docs/benchmarks/02_experiment_summary.md`](benchmarks/02_experiment_summary.md).
+- **Result of experiment 03 (2026-09-10):** experiment 02 with the WildRF train split
+  removed and nothing else changed, so the WildRF test sample becomes a genuine
+  cross-dataset test: AUC 0.804 (0.980 in-distribution), false-positive rate on laundered
+  social-media photographs 54.7% at 0.5 (13.7%), true-positive rate 89.3% (97.0%), COCO
+  false-positive rate unchanged at 2.6%. The head reads platform laundering as evidence of
+  generation; the real-image distribution decides generalization, as in experiments 01 and
+  02. The shipped default stays the experiment 02 head. See
+  [`docs/benchmarks/06_experiment_03_summary.md`](benchmarks/06_experiment_03_summary.md).
 
 ### Phase 4 — Manipulation localization
 

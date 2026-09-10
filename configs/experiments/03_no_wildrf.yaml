@@ -1,0 +1,49 @@
+# Experiment 03: experiment 02 without the WildRF train split
+# (see docs/benchmarks/02_experiment_summary.md and 06_experiment_03_summary.md).
+#
+#   imgforensics train head --config configs/experiments/03_no_wildrf.yaml
+#
+# Same model, same augmentation and calibration recipe as experiment 02; only
+# the data changes:
+#   - the WildRF train split is removed from the train manifest, so WildRF's
+#     test split becomes a genuine cross-dataset test (in experiment 02 it was
+#     held-out images of a distribution the head had seen);
+#   - 800 of the 4,000 COCO reals (the lowest sha256 values) move from train
+#     to val, so calibration is still fitted on a real class drawn from more
+#     than one source rather than on perfectly separable scores.
+# COCO's held-out 1,000, WildRF's val and test splits and CocoGlide are never
+# seen in training.
+
+train_manifest: data/manifests/train_03.jsonl
+val_manifest: data/manifests/val_03.jsonl
+cache_dir: data/features
+
+backbone: dinov2_vitb14
+
+crop:
+  size: 224
+  mode: grid
+  max_crops: 4
+  seed: 0
+
+augment: configs/augment_default.yaml
+views: 2
+train_views: augmented_only
+
+head:
+  proj_dim: 256
+  hidden_dim: 256
+  dropout: 0.2
+  layer_weighting: softmax
+
+epochs: 20
+batch_size: 256
+lr: 0.001
+weight_decay: 0.01
+label_smoothing: 0.05
+balance_classes: true
+early_stopping_patience: 5
+seed: 0
+
+out_dir: weights/dinov2_head_03
+device: auto
