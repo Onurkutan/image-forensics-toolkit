@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
@@ -39,8 +41,11 @@ from imgforensics.data import (
 from imgforensics.detectors import BACKBONES, CropPolicy, FeatureCache, FeatureExtractor
 from imgforensics.detectors.features import extract_to_cache
 from imgforensics.eval.preprocess import AugmentationConfig
+from imgforensics.eval.records import ScoreRecord
 from imgforensics.eval.robustness import RobustnessSuite
-from imgforensics.eval.runner import BenchmarkConfig, run_benchmark
+from imgforensics.eval.runner import BenchmarkConfig, BenchmarkResult, run_benchmark
+from imgforensics.fusion.report import explain
+from imgforensics.fusion.stacking import Fuser, fit_fuser
 from imgforensics.localization import (  # also registers the iml_vit localizer
     WEIGHTS,
     fetch_weights,
@@ -55,11 +60,13 @@ manifest_app = typer.Typer(help="Build dataset manifests.")
 features_app = typer.Typer(help="Extract and cache frozen-backbone features.")
 train_app = typer.Typer(help="Train the learned detectors' heads.")
 weights_app = typer.Typer(help="Fetch pretrained model weights, after a license gate.")
+fusion_app = typer.Typer(help="Fit and inspect calibrated stacking fusers.")
 app.add_typer(datasets_app, name="datasets")
 app.add_typer(manifest_app, name="manifest")
 app.add_typer(features_app, name="features")
 app.add_typer(train_app, name="train")
 app.add_typer(weights_app, name="weights")
+app.add_typer(fusion_app, name="fusion")
 console = Console()
 # A wider, fixed-width console for the dataset-registry tables: names and
 # license strings are long enough that the default (terminal-detected, often
@@ -70,6 +77,77 @@ _registry_console = Console(width=160)
 _DETAIL_STRING_LIMIT = 80
 _DEFAULT_FEATURE_CACHE = Path("data/features")
 _BYTES_PER_MIB = 1024 * 1024
+_FUSER_PATH_ENV = "IMGFORENSICS_FUSER"
+_DEFAULT_FUSER_PATH = Path("weights/fuser.json")
+
+
+def _resolve_fuser_path(explicit: Path | None) -> Path | None:
+    """Resolve the fuser to use for ``analyze``: ``--fuser``, then the env var, then the default.
+
+    The default path is only used when the file actually exists (so
+    ``analyze`` behaves identically to today when no fuser has ever been
+    fitted); an explicit ``--fuser`` or ``$IMGFORENSICS_FUSER`` is expected
+    to point at a real file and is not silently ignored if it does not.
+    """
+    if explicit is not None:
+        return explicit
+    env_value = os.environ.get(_FUSER_PATH_ENV)
+    if env_value:
+        return Path(env_value)
+    if _DEFAULT_FUSER_PATH.is_file():
+        return _DEFAULT_FUSER_PATH
+    return None
+
+
+_TOP_CONTRIBUTIONS_SHOWN = 5
+
+
+def _fusion_payload(fuser_model: Fuser, results: list[DetectionResult]) -> dict[str, Any]:
+    """The fused verdict for one ``analyze`` run: probability, label, band, and contributions."""
+    scores = {result.detector: result.score for result in results}
+    probability = fuser_model.predict(scores)
+    label = fuser_model.predict_label(scores)
+    contributions = explain(fuser_model, scores)
+    return {
+        "probability": probability,
+        "label": label,
+        "band": {"low": fuser_model.band.low, "high": fuser_model.band.high},
+        "contributions": [
+            {
+                "detector": contribution.detector,
+                "score": contribution.score,
+                "weight": contribution.weight,
+                "contribution": contribution.contribution,
+                "present": contribution.present,
+                "note": contribution.note,
+            }
+            for contribution in contributions
+        ],
+    }
+
+
+def _print_fusion_panel(fusion: dict[str, Any]) -> None:
+    contributions_table = Table(show_header=True, box=None)
+    contributions_table.add_column("detector", style="bold")
+    contributions_table.add_column("score", justify="right")
+    contributions_table.add_column("contribution", justify="right")
+    contributions_table.add_column("note")
+    for item in fusion["contributions"][:_TOP_CONTRIBUTIONS_SHOWN]:
+        score_text = f"{item['score']:.2f}" + ("" if item["present"] else " (missing)")
+        contributions_table.add_row(
+            item["detector"], score_text, f"{item['contribution']:+.3f}", escape(item["note"])
+        )
+
+    band = fusion["band"]
+    panel = Panel(
+        contributions_table,
+        title=(
+            f"Fused verdict  probability={fusion['probability']:.2f}  {fusion['label']}  "
+            f"(band [{band['low']:.2f}, {band['high']:.2f}])"
+        ),
+        title_align="left",
+    )
+    console.print(panel)
 
 
 def _jsonable(value: Any) -> Any:
@@ -140,11 +218,28 @@ def analyze(
         list[str] | None,
         typer.Option("--detector", help="Run only this detector (repeatable). Default: all."),
     ] = None,
+    fuser: Annotated[
+        Path | None,
+        typer.Option(
+            "--fuser",
+            help=(
+                "fuser.json to fuse detector scores into one verdict with. "
+                f"Default: ${_FUSER_PATH_ENV}, else {_DEFAULT_FUSER_PATH} if it exists, else none."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Analyze a single image and print per-detector results."""
     forensic_image = ForensicImage.from_path(path)
     digest = image_hash(forensic_image.rgb)
     names = _resolve_detector_names(detector)
+
+    fuser_path = _resolve_fuser_path(fuser)
+    loaded_fuser: Fuser | None = None
+    if fuser_path is not None:
+        if not fuser_path.is_file():
+            raise typer.BadParameter(f"Fuser file not found: {fuser_path}")
+        loaded_fuser = Fuser.load(fuser_path)
 
     results: list[DetectionResult] = []
     heatmap_paths: dict[str, Path | None] = {}
@@ -159,6 +254,8 @@ def analyze(
         if save_heatmaps is not None and result.heatmap is not None:
             saved_path = _save_heatmap(result.heatmap, save_heatmaps, path.stem, name)
         heatmap_paths[name] = saved_path
+
+    fusion_payload = _fusion_payload(loaded_fuser, results) if loaded_fuser is not None else None
 
     if json_output:
         document = {
@@ -181,6 +278,8 @@ def analyze(
                 for result in results
             ],
         }
+        if fusion_payload is not None:
+            document["fusion"] = _jsonable(fusion_payload)
         typer.echo(json.dumps(document, indent=2))
         return
 
@@ -217,6 +316,9 @@ def analyze(
             title_align="left",
         )
         console.print(panel)
+
+    if fusion_payload is not None:
+        _print_fusion_panel(fusion_payload)
 
 
 @app.command()
@@ -1011,6 +1113,134 @@ def manifest_crop(
     console.print(table)
     console.print(f"Wrote {len(cropped_manifest.entries)} entries to {out}")
     console.print(json.dumps(cropped_manifest.summary(), indent=2))
+
+
+@fusion_app.command("fit")
+def fusion_fit(
+    records_paths: Annotated[
+        list[Path],
+        typer.Argument(
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help="BenchmarkResult JSON file(s), as written by 'imgforensics benchmark --out'.",
+        ),
+    ],
+    out: Annotated[Path, typer.Option("--out", help="Path to write the fitted fuser.json to.")],
+    level: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--level",
+            help="Robustness level to include (repeatable). Default: every level present.",
+        ),
+    ] = None,
+    detector: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--detector",
+            help="Detector to fuse (repeatable). Default: every non-baseline detector present.",
+        ),
+    ] = None,
+    target_bacc: Annotated[
+        float,
+        typer.Option(
+            "--target-bacc",
+            help="Target balanced accuracy outside the abstain band.",
+        ),
+    ] = 0.9,
+) -> None:
+    """Fit a calibrated stacking fuser on one or more saved benchmark results."""
+    records: list[ScoreRecord] = []
+    source_hashes: dict[str, str] = {}
+    for records_path in records_paths:
+        result = BenchmarkResult.load_json(records_path)
+        records.extend(result.records)
+        source_hashes[str(records_path)] = hashlib.sha256(records_path.read_bytes()).hexdigest()
+
+    try:
+        fitted = fit_fuser(
+            records,
+            detectors=detector or None,
+            levels=level or None,
+            target_balanced_accuracy=target_bacc,
+            records_sha256=source_hashes,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    fitted.save(out)
+
+    table = Table(title="Fuser fit report")
+    table.add_column("field", style="bold")
+    table.add_column("value")
+    table.add_row("detectors", ", ".join(fitted.detectors))
+    table.add_row(
+        "images (fake / real)",
+        f"{fitted.fit_info.n_images} ({fitted.fit_info.n_fake} / {fitted.fit_info.n_real})",
+    )
+    table.add_row("sources", ", ".join(fitted.fit_info.sources) or "-")
+    table.add_row("levels", ", ".join(fitted.fit_info.levels) or "-")
+    table.add_row("train AUC", f"{fitted.metrics.train_auc:.4f}")
+    table.add_row("held-out AUC", f"{fitted.metrics.holdout_auc:.4f}")
+    table.add_row(
+        "ECE before -> after", f"{fitted.metrics.ece_before:.4f} -> {fitted.metrics.ece_after:.4f}"
+    )
+    table.add_row("temperature", f"{fitted.temperature:.3f}")
+    table.add_row("band [low, high]", f"[{fitted.band.low:.3f}, {fitted.band.high:.3f}]")
+    table.add_row("abstain rate", f"{fitted.metrics.abstain_rate:.3f}")
+    table.add_row(
+        "outside-band balanced accuracy", f"{fitted.metrics.outside_band_balanced_accuracy:.4f}"
+    )
+    console.print(table)
+    console.print(f"Wrote {out}")
+
+
+@fusion_app.command("info")
+def fusion_info(
+    fuser_path: Annotated[
+        Path,
+        typer.Argument(exists=True, dir_okay=False, readable=True, help="fuser.json to inspect."),
+    ],
+) -> None:
+    """Print a fitted fuser's detectors, weights, abstain band, and fit metrics."""
+    fitted = Fuser.load(fuser_path)
+
+    table = Table(title=f"Fuser: {fuser_path}")
+    table.add_column("field", style="bold")
+    table.add_column("value")
+    table.add_row("format_version", str(fitted.format_version))
+    table.add_row("created", fitted.created)
+    table.add_row("package_version", fitted.package_version)
+    table.add_row("bias", f"{fitted.bias:.4f}")
+    table.add_row("temperature", f"{fitted.temperature:.4f}")
+    table.add_row("band [low, high]", f"[{fitted.band.low:.3f}, {fitted.band.high:.3f}]")
+    table.add_row(
+        "images (fake / real)",
+        f"{fitted.fit_info.n_images} ({fitted.fit_info.n_fake} / {fitted.fit_info.n_real})",
+    )
+    table.add_row("sources", ", ".join(fitted.fit_info.sources) or "-")
+    table.add_row("levels", ", ".join(fitted.fit_info.levels) or "-")
+    table.add_row("train AUC", f"{fitted.metrics.train_auc:.4f}")
+    table.add_row("held-out AUC", f"{fitted.metrics.holdout_auc:.4f}")
+    table.add_row(
+        "ECE before -> after", f"{fitted.metrics.ece_before:.4f} -> {fitted.metrics.ece_after:.4f}"
+    )
+    table.add_row("abstain rate", f"{fitted.metrics.abstain_rate:.3f}")
+    table.add_row(
+        "outside-band balanced accuracy", f"{fitted.metrics.outside_band_balanced_accuracy:.4f}"
+    )
+    table.add_row("records_sha256", json.dumps(fitted.records_sha256))
+    console.print(table)
+
+    weights_table = Table(title="Per-detector weights")
+    weights_table.add_column("detector")
+    weights_table.add_column("logit weight", justify="right")
+    weights_table.add_column("presence weight", justify="right")
+    for index, name in enumerate(fitted.detectors):
+        weights_table.add_row(
+            name, f"{fitted.logit_weights[index]:.4f}", f"{fitted.presence_weights[index]:.4f}"
+        )
+    console.print(weights_table)
 
 
 if __name__ == "__main__":

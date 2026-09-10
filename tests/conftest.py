@@ -7,12 +7,78 @@ behave the way they would on a real photo. A flat or pure-noise image would
 either match every block trivially (flat) or none at all (pure noise), and
 JPEG quantization needs some low-frequency content to have anything to
 quantize.
+
+``synthetic_fusion_records`` is the fusion tests' equivalent: a set of
+:class:`~imgforensics.eval.records.ScoreRecord` for a fixed number of
+synthetic images and named detectors with a controllable score/label
+relationship, so a stacking fuser can be fitted and its learned weights
+checked without running any real detector or ML model.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 from PIL import Image, ImageDraw
+
+from imgforensics.eval.records import ScoreRecord
+
+
+def synthetic_fusion_records(
+    detector_scores: dict[str, Callable[[float, np.random.Generator], float]] | None = None,
+    *,
+    n_per_class: int = 200,
+    level: str = "clean",
+    source: str = "synthetic",
+    seed: int = 0,
+) -> list[ScoreRecord]:
+    """Build ``2 * n_per_class`` images' worth of :class:`ScoreRecord` for named detectors.
+
+    Args:
+        detector_scores: ``{detector name: fn(true_label_as_float, rng) -> score}``.
+            Defaults to three detectors that exercise the three cases a
+            stacking fuser has to handle: ``"informative"`` (correlates with
+            the true label), ``"inverted"`` (anti-correlates), and
+            ``"abstaining"`` (always 0.5, carries no information).
+        n_per_class: Number of real images and of fake images (so
+            ``2 * n_per_class`` images total).
+        level: Robustness level recorded on every row.
+        source: Source name recorded on every row.
+        seed: Seed for the score noise.
+    """
+    if detector_scores is None:
+        detector_scores = {
+            "informative": lambda y, rng: float(
+                np.clip(y * 0.9 + 0.05 + rng.normal(0, 0.05), 1e-3, 1 - 1e-3)
+            ),
+            "inverted": lambda y, rng: float(
+                np.clip((1 - y) * 0.9 + 0.05 + rng.normal(0, 0.05), 1e-3, 1 - 1e-3)
+            ),
+            "abstaining": lambda _y, _rng: 0.5,
+        }
+
+    rng = np.random.default_rng(seed)
+    records: list[ScoreRecord] = []
+    labels = ["real"] * n_per_class + ["fake"] * n_per_class
+    for index, label in enumerate(labels):
+        entry_path = f"synthetic/{label}/{index:04d}.png"
+        y = 1.0 if label == "fake" else 0.0
+        for detector, score_fn in detector_scores.items():
+            records.append(
+                ScoreRecord(
+                    entry_path=entry_path,
+                    label=label,
+                    source=source,
+                    generator=None,
+                    split=None,
+                    level=level,
+                    detector=detector,
+                    score=score_fn(y, rng),
+                    elapsed_ms=None,
+                )
+            )
+    return records
 
 
 def natural_like_image(size: tuple[int, int] = (512, 512), seed: int = 0) -> Image.Image:
