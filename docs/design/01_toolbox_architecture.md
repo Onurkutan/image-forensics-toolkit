@@ -1,8 +1,7 @@
 # Design note 01: the interactive forensic toolbox
 
-Status: proposed, 2026-09-10. Open decision for the project owner: **web client or
-desktop client** (section 5). Everything else in this note can proceed under either
-answer.
+Status: accepted, 2026-09-10. The project owner chose the **web client** (section 5);
+a desktop shell stays a possible later wrapper around the same API.
 
 ## 1. What the end product is
 
@@ -102,7 +101,7 @@ panels that re-run one tool without re-running all, or tiled maps for a 12-megap
 image. The toolbox needs all three. Plan: Gradio demo first (cheap, public link), the
 workbench on the API afterwards; the demo is retired once the workbench is deployed.
 
-## 5. The open decision: web or desktop
+## 5. Web or desktop (decided: web)
 
 | | Web client (recommended) | Desktop client (PySide6, LGPL) |
 |---|---|---|
@@ -119,8 +118,7 @@ project a public demo, and keeps the client stateless. A desktop shell can wrap 
 API later (a local server plus a webview) if offline field use becomes a real
 requirement; that path costs little because the client would not change.
 
-What the decision changes: the client's technology only. Sections 3.1 and 3.2 are the
-same under either answer and are where the work starts.
+Decision (2026-09-10): web client. Sections 3.1 and 3.2 are where the work starts.
 
 ## 6. Tool catalogue
 
@@ -158,7 +156,7 @@ self-made fixtures, documented failure modes on laundered images, and a benchmar
 - **6e. CPU inference.** ONNX export of the head; profile and vectorize the pure-Python JPEG
   coefficient decoder, which at about 340 ms per 256 px image is the first thing a CPU
   deployment will feel.
-- **6f. Desktop shell**, only if the decision in section 5 turns out to need it.
+- **6f. Desktop shell**, only if offline field use becomes a requirement later.
 
 ## 8. Risks
 
