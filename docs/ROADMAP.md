@@ -323,18 +323,18 @@ every external model, dataset and library with its license and how it is used.
 | In-house inpainting set built on COCO | COCO images carry mixed Flickr licenses | Release masks, prompts, image IDs and generation scripts only, not images |
 | jpegio, c2pa-python, prnu-python, invisible-watermark, exiftool | Apache-2.0 / MIT / GPL (exiftool, called as an external binary) | Allowed; exiftool is invoked as a subprocess, not linked, so the GPL does not extend to this code |
 
-**Keeping a commercial path open.** The project is non-commercial today, but nothing in
-the design should close the door:
+**Licensing provenance.** The project is non-commercial and is expected to stay so. The
+bookkeeping below exists so that the licensing of anything the project produces can always
+be traced, not as preparation for a change of purpose:
 
-1. Every dataset and model entry carries a `commercial_ok` flag; training configs can
-   filter on it, so a commercially clean model is a retrain on a filtered subset, not a
-   rewrite. Weights trained on research-only data are treated as research-only.
+1. Every dataset and model entry carries a `commercial_ok` flag, and a trained checkpoint
+   inherits that flag ANDed across its training manifests, so a weight file always says
+   which terms its data carried. Weights trained on research-only data are research-only.
 2. Research-only models live in a separate optional extra (`pip install
    "imgforensics[research]"`); the default install contains only permissively licensed
    components.
-3. The author remains the sole copyright holder unless outside contributions are accepted
-   under a contributor agreement (DCO sign-off at minimum), which preserves the freedom to
-   relicense future versions.
+3. Outside contributions, if any are accepted, come in under a DCO sign-off so the
+   provenance of the code stays as clear as that of the data.
 
 ## 8. Risks and fallbacks
 

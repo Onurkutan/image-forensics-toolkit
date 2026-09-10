@@ -2,455 +2,319 @@
 
 [![CI](https://github.com/Onurkutan/image-forensics-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/Onurkutan/image-forensics-toolkit/actions/workflows/ci.yml)
 
-A toolkit to detect AI-generated images, AI-inpainted regions, and classic manipulations
-(splicing/copy-move), producing an image-level score plus an optional heatmap.
+A toolkit that produces *calibrated evidence* about whether an image is fully AI-generated,
+locally AI-edited (inpainting, generative fill) or classically manipulated (splicing,
+copy-move) -- with heatmaps, plain-language explanations, and a benchmark harness that says
+what each piece of evidence is worth. It is for anyone holding one image who needs to say
+something defensible about it, and for anyone who wants to see how such a system is built and
+measured. There is no universal "AI or not" verdict for any image, and nothing here claims
+one: this toolkit measures, calibrates, and says when it is unsure.
 
-Status: early development (v0.1.0). Seven classical signals are implemented so
-far: `metadata` (EXIF/XMP/editor/AI-generator markers, thumbnail consistency,
-JPEG quality estimate and quantization-table classification), `ela` (Error
-Level Analysis with heatmap), `c2pa` (C2PA manifest verification),
-`sd_watermark` (Stable Diffusion invisible-watermark decode), `copy_move`
-(block-matching duplicated-region detection with heatmap), `jpeg_ghost`
-(JPEG-ghost recompression-quality mismatch with heatmap) and `double_jpeg`
-(blocking-grid offset and aligned double-quantization periodicity). See
-[Signals](#signals) below for what each one reads and its blind spots.
+Status: v0.1.0, early development. Every number below comes from
+[`docs/benchmarks/`](docs/benchmarks/), the unflattering ones included.
 
-## Planned architecture
+## What you get
 
-- **Detectors** (`imgforensics.detectors`): image-level classifiers that score a whole image as
-  real or AI-generated.
-- **Localization** (`imgforensics.localization`): pixel-level localizers that highlight
-  manipulated or AI-inpainted regions with a heatmap.
-- **Signals** (`imgforensics.signals`): classical low-level signal analyzers such as noise
-  residuals, error level analysis, and JPEG artifact statistics.
-- **Views** (`imgforensics.views`): maps that render the image under one transform and claim
-  no verdict, for a person to read.
-- **Fusion** (`imgforensics.fusion`): combines detector and localizer outputs into a single
-  image-level score with an explanation.
-- **Service** (`imgforensics.service`): the headless session layer -- tool catalogue,
-  parameters, cached results, map tiles -- an interactive client talks to.
+- **A workbench.** `imgforensics serve`, then one URL: a tool tree grouped by what each tool
+  looks at, one shared pan/zoom across the original and every open map (drawn from 256-pixel
+  tiles, so a 12-megapixel heatmap costs a few PNGs instead of 48 MB), parameter sliders that
+  re-run a tool 400 ms after they stop moving, per-tool and fused verdicts with the abstain
+  band drawn on them, and the report download. Plain HTML, CSS and ES modules -- no build step,
+  no Node, no CDN, and a Content-Security-Policy that permits requests to this server only.
+- **A CLI.** `imgforensics analyze image.jpg` prints one card per tool; `--report-dir out/`
+  writes `report.json`, a `report.md` of plain-language cards, and a heatmap/overlay PNG pair
+  per tool that produced a map.
+- **14 tools in four kinds.** Seven classical signals (`metadata`, `ela`, `c2pa`,
+  `sd_watermark`, `copy_move`, `jpeg_ghost`, `double_jpeg`); three views that render the image
+  under one transform and claim no verdict (`luminance_gradient`, `noise_residual`,
+  `bit_planes`); one learned whole-image detector (`dinov2_head`, with a Grad-CAM map showing
+  where it looked); three localizers (`iml_vit`, `catnet_v2`, `localizer_ensemble`).
+- **Calibrated fusion with an abstain band** -- a pure-numpy logistic stacking model over the
+  tool scores, fitted on saved benchmark records, allowed to answer "uncertain".
+- **A benchmark harness** -- manifests with file hashes and licenses, a class-bias audit, a
+  deterministic 15-level robustness suite, per-level pixel metrics, trivial baselines in every
+  table, Markdown reports.
+- **A demo and an HTTP API** -- one Gradio page and a FastAPI service, both over the same
+  headless library the CLI uses.
 
-## Quickstart
+## Try it in two minutes
 
 ```bash
 git clone https://github.com/Onurkutan/image-forensics-toolkit.git
 cd image-forensics-toolkit
 python -m venv .venv
 # Windows: .venv\Scripts\activate      macOS/Linux: source .venv/bin/activate
-pip install -e ".[dev]"
-# Optional: pip install -e ".[dev,provenance]" to also enable the c2pa signal
-imgforensics analyze path/to/image.jpg
-imgforensics analyze image.jpg --json --save-heatmaps out/
-pytest
-```
 
-## Signals
-
-Each signal is a self-contained, explainable check. Score is the probability
-the image is generated/manipulated (0 = confidently real, 1 = confidently
-fake); label is `real`, `fake` or `uncertain`. No signal alone should be read
-as a verdict -- see `details` in its output for the evidence.
-
-| Signal | Reads | Score means | Known blind spots |
-|---|---|---|---|
-| `metadata` | EXIF/XMP, PNG text chunks, Photoshop APP13, embedded EXIF thumbnail, JPEG quantization tables | High = a known AI-generator/editor marker or a thumbnail/image mismatch was found; low = camera EXIF with no edit trace; 0.5 = no usable metadata | Stripped by almost every sharing platform (upload to social media and this signal goes blind); markers are only as good as the list of known tool names |
-| `ela` | Re-encodes the image at a fixed JPEG quality and diffs against the original | Bounded to [0.3, 0.65] -- an explanation aid (see the heatmap), never a standalone verdict | Useless on an already-uniformly-recompressed image; a second JPEG save by any platform equalises the error level everywhere |
-| `c2pa` | Any C2PA manifest embedded in the file (via `c2pa-python`, optional `provenance` extra) | High = signed as AI-generated or the signed content hash no longer matches; low = signed camera capture with no edits; 0.5 = no manifest or an untrusted/self-signed signer with no other evidence | A missing manifest proves nothing -- most images, including AI-generated ones, carry no C2PA data at all; manifests are stripped by many platforms just like EXIF |
-| `sd_watermark` | Decodes the DWT-DCT ("dwtDct") invisible watermark Stable Diffusion reference pipelines embed, checking bit-agreement against known payloads | High = a known payload's decoded bits matched; 0.45 = no known payload matched | This specific scheme embeds only in chroma and does not survive JPEG re-encoding (even at quality 100, due to chroma subsampling) or a resize; only covers the two reference-pipeline payloads, not every SD fork or later generators |
-| `copy_move` | Block-matching search (downscaled, quantized zig-zag DCT features) for a duplicated region copied and pasted elsewhere in the same image, with a matched-region heatmap | 0.85 "fake" = a dominant shift with enough votes and matched area found; 0.60 "uncertain" = accepted but small matched area; 0.45 "uncertain" = no duplicate found (not evidence of authenticity) | Blind to a clone that was rotated or rescaled before pasting; heavy recompression can in principle merge distinct blocks; naturally repetitive textures (tiles, fences) are guarded against via a minimum-distance rule and a shift-consistency check, but are not impossible to fool |
-| `jpeg_ghost` | Re-saves the image at a range of JPEG qualities and finds, per block, the quality whose re-save error is anomalously low compared to the rest of the image (Farid's JPEG ghosts), with a heatmap | Bounded to [0.3, 0.7] like `ela` -- an explanation aid, never a standalone verdict | Requires the image to be JPEG-derived; useless once a platform has uniformly re-encoded the whole image after the fact |
-| `double_jpeg` | Two independent pixel-domain checks: whether the JPEG 8x8 blocking grid still starts at the image origin, with a secondary-phase check for a masked older grid underneath it (crop/composite detection); and, for JPEG inputs only, whether the DCT coefficient histogram -- normalized by the file's own quantization step, so the check measures a genuine second, coarser compression rather than just how lossy the current one is -- shows aligned double-quantization periodicity | 0.75 "fake" = blocking grid misaligned; 0.60 "uncertain" = a second, offset grid or double compression suspected (weak evidence alone); 0.45/0.40 "uncertain" = no JPEG history detectable / no evidence either way | Both checks are quantization-history fingerprints, not proof of malicious editing; the double-quantization check only detects a *coarser-then-finer* double compression (the reverse order, and same-or-finer-then-coarser, leave no detectable comb) and only on JPEG inputs; a suspected double compression is common for any re-shared image, and a misaligned grid only proves a crop-then-resave happened |
-
-## Project layout
-
-```
-image-forensics-toolkit/
-├── src/imgforensics/
-│   ├── core/            # types, base detector class, registry
-│   ├── detectors/       # image-level detectors
-│   ├── localization/    # pixel-level localizers
-│   ├── signals/         # classical low-level signals
-│   ├── views/           # maps that show, without claiming a verdict
-│   ├── fusion/          # score fusion and explanation
-│   ├── service/         # headless session layer for an interactive client
-│   ├── data/            # dataset loaders and download helpers
-│   ├── utils/           # image I/O helpers
-│   └── cli.py           # command-line interface
-├── tests/
-└── docs/
-```
-
-## Data and evaluation
-
-A dataset manifest is a JSON Lines file of labeled images (path, label,
-source, generator, split, mask path, sha256, resolution, format, JPEG
-quality) plus a `*.meta.json` sidecar (dataset name, license,
-`commercial_ok`). Build one from a folder tree with `real`/`fake`
-subfolders via `imgforensics manifest build ROOT --dataset NAME --out
-manifest.jsonl`, browse the external dataset registry with `imgforensics
-datasets list` / `datasets show NAME`, and check a manifest's real/fake
-halves for format, resolution, JPEG-quality, and duplicate-image bias with
-`imgforensics audit manifest.jsonl [--strict]`. `imgforensics datasets
-fetch NAME --dest DIR --accept-license` downloads a registered dataset per
-its packaged recipe (`imgforensics datasets recipe NAME` prints it first;
-`--dry-run` prints the license and plan without downloading) -- it always
-prints the license and refuses to proceed without `--accept-license`, and
-never asks for or stores Kaggle/Hugging Face credentials: a dataset that
-needs one prints instructions and stops instead. `imgforensics datasets
-prepare NAME --src DIR --out manifest.jsonl` turns a downloaded folder into
-a manifest using a per-dataset layout description, falling back to
-`label_from_parent_folder` when none is registered. A Hugging Face (`hf`)
-step can bound its download to a `max_files` sample of the repository
-instead of pulling it whole -- Community Forensics defaults to the first 8
-sorted Parquet shards of the ~260 GB `-Small` repository (`--variant full`
-for everything). `imgforensics manifest
-sample IN --n N --out OUT` draws a deterministic, stratified subsample, and
-`imgforensics manifest merge A B ... --out OUT` combines manifests.
-`imgforensics manifest crop IN --out-dir DIR --out OUT --size N --mode
-center|tiles [--label real ...]` writes native-resolution square crops
-(never a resize) of the selected labels into a new manifest, closing a
-resolution gap between classes -- e.g. 1024 px reals vs. 512 px fakes --
-that would otherwise let a detector learn scene scale instead of
-generation artifacts. See
-[`imgforensics.eval.metrics`](src/imgforensics/eval/metrics.py) for the
-image-level (AUC, AP, accuracy, ECE, ...) and pixel-level (F1, best-F1, AP,
-IoU) metrics used to score detectors and localizers.
-
-## Benchmarking
-
-`imgforensics benchmark manifest.jsonl [--detector NAME ...] [--baselines]
-[--robustness default|PATH|none] [--out results.json] [--report report.md]
-[--workers N]`
-runs registered detectors, plus optional trivial baselines, over a manifest
-at every level of a deterministic robustness suite (clean; JPEG/WEBP
-re-encoding; resize; a resize round-trip; center crop; Gaussian noise; a
-"social" resize+JPEG+metadata-strip pipeline; see
-[`robustness_default.yaml`](src/imgforensics/eval/robustness_default.yaml)),
-and prints Markdown tables: image metrics, per-level robustness, per-group
-AUC, pixel metrics, and timing. Each detector's threshold is tuned on the
-manifest's val split when one exists; otherwise the report is marked
-"threshold tuned in-sample" as a caveat against reading it as held-out. At
-any operating threshold, a score must be strictly above it to count as a
-"fake" call, so a detector abstaining at the classical-signal midpoint of
-0.5 is not scored as calling every image fake. `--workers N` runs the
-classical signal detectors (and, if `--baselines` is passed, the cheap
-`constant`/`random` baselines) across `N` worker processes instead of one,
-so they no longer bottleneck a slower GPU-based detector evaluated in the
-same run; results are identical to `--workers 1` (the default), only faster.
-
-## Learned detectors (optional `ml` extra)
-
-The learned half of the toolkit (Phase 3) is built on a **frozen** ViT
-backbone: features are extracted once, cached on disk, and a small head is
-trained on top of them. Nothing here is installed by default -- `torch`,
-`torchvision`, `timm` and `safetensors` live in the optional `ml` extra, and
-the rest of the package imports and runs without them.
-
-```bash
-# 1. torch first, from the wheel index your driver supports (cu130 shown; use cpu for CPU-only)
+# torch first, from the wheel index your driver supports (cu130 shown; use cpu for CPU-only)
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
-# 2. then the package with the ml extra (timm, safetensors resolve from PyPI)
-pip install -e ".[dev,ml]"
-
-imgforensics features extract manifest.jsonl --cache-dir data/features
-imgforensics features info --cache-dir data/features
+pip install -e ".[ml,api]"
 ```
 
-Two backbones are registered: `dinov2_vitb14` (DINOv2 ViT-B/14, the default;
-a frozen self-supervised space separates real from generated images better
-than a language-aligned one) and `clip_vitl14` (OpenAI CLIP ViT-L/14, kept as
-the comparison space). Both are read at several depths: `extract` returns the
-CLS token of each selected transformer block plus the model's pooled output,
-as an array of shape `(n_crops, n_layers, dim)`.
-
-**Crop, never resize.** Every image reaches the backbone as native-resolution
-224 px crops -- `center`, `grid` (the tiles closest to the image center) or
-`random` (seeded from the image's own bytes, so the crops are reproducible per
-image). Resizing would low-pass exactly the high-frequency generator artifacts
-a detector keys on, so it never happens: images *smaller* than the crop size
-are reflection-padded, not upscaled.
-
-**Feature cache.** `imgforensics features extract` writes one `.npz` per
-(image sha256, backbone, crop policy) under `--cache-dir` (default
-`data/features`, gitignored), storing the features as float16 alongside the
-layer indices, crop policy and backbone that produced them. Re-running skips
-anything already cached, so changing the head -- or adding images to a
-manifest -- costs no GPU time for the images already done. Both `features`
-commands print an install hint and exit 1 when the `ml` extra is missing.
-
-**Weights are downloaded, never committed.** The backbone weights (about
-350 MB for DINOv2 ViT-B/14) are fetched from the Hugging Face Hub on first
-use and cached there; set `IMGFORENSICS_WEIGHTS_DIR` to keep them in the
-project's gitignored `weights/` directory instead. See
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for each model's license.
-
-Extraction can run image decoding, window cutting and augmentation in worker processes with
-`features extract --workers N`; augmented views are computed on a 2x crop window aligned to the
-image's 16-pixel grid rather than on the whole image, which keeps the JPEG block alignment of
-whole-image augmentation while avoiding full-resolution re-encoding of very large photographs.
-
-### Training a head
-
-The backbone stays frozen; the only thing that trains is a ~1.06 M-parameter
-head (per-layer LayerNorm + projection, learned layer-importance weights, and
-a small MLP) over the cached features. On the cached features that is minutes,
-not hours.
-
-```bash
-# 1. Cache features. --views 2 adds one augmented copy per image on top of the
-#    un-augmented view 0, so the head never learns the training set's own
-#    JPEG history. (Optional -- `train head` extracts anything missing itself.)
-imgforensics features extract data/manifests/train.jsonl     --cache-dir data/features --views 2 --augment configs/augment_default.yaml
-
-# 2. Train, calibrate and write the checkpoint.
-imgforensics train head --config configs/head_dinov2.yaml [--epochs N] [--out DIR]
-```
-
-Augmented views are part of the cache key, so switching augmentation policies
-never silently reuses the wrong features, and view 0 is shared with a plain
-extraction because it is un-augmented by construction. `configs/augment_default.yaml`
-is the packaged policy: JPEG Q30–95 (p 0.7), WEBP Q40–95, downscale-upscale,
-blur, noise and cut-out, each at its own rate.
-
-**Where the checkpoint lands.** `configs/head_dinov2.yaml` writes
-`weights/dinov2_head/` (gitignored), holding three files: `head.safetensors`
-(the weights), `head.json` (everything needed to reuse them) and
-`training_log.jsonl` (one line per epoch). Training keeps the best
-image-level validation AUC, early-stops, then fits a temperature and bias on
-the validation split and reports the ECE before and after — a calibration
-that does not reduce the ECE is not applied, and the checkpoint says so.
-
-**How `analyze` picks it up.** The learned detector is registered as
-`dinov2_head` and runs alongside the classical signals, but only when the `ml`
-extra is installed. It looks for its checkpoint in `weights/dinov2_head/`, or
-wherever `IMGFORENSICS_HEAD_DIR` points:
-
-```bash
-IMGFORENSICS_HEAD_DIR=weights/my_head imgforensics analyze image.jpg --detector dinov2_head
-```
-
-It crops the image per the checkpoint's own crop policy, scores each crop, and
-reports the mean calibrated probability plus a heatmap with each crop's
-probability painted over the region it came from. **With no checkpoint
-installed it abstains** — score 0.5, label `uncertain`, and a `reason` saying
-where it looked — rather than failing the run.
-
-**The checkpoint records its training data's licenses.** `head.json` carries
-each training and validation manifest's name, entry count, file sha256,
-license string, and the `commercial_ok` flag ANDed across them (`null` when
-any source is unverified, `false` when any is research-only). A head trained
-on research-only data is itself research-only, and this is the only place that
-fact survives the move from data to model.
-
-### Attribution: where the head looked
-
-The heatmap says *how generated* each crop looks; the attribution map answers
-the other half of the question — *where inside those crops* the classifier
-found its evidence. It is Grad-CAM on the backbone's own patch grid (16x16 for
-DINOv2 ViT-B/14 at 224 px), with two adaptations to this architecture: the
-gradient is taken of the **calibrated** logit, so the picture explains the
-number the report prints rather than an intermediate one, and because the head
-reads several transformer blocks there is one map per depth, combined with the
-head's own learned layer-importance weights.
-
-`analyze` writes it next to the heatmap: `<stem>_<detector>_attribution.png`
-under `--save-heatmaps`, an `attribution` entry in `--json`, and a
-`<detector>_attribution.png` / `<detector>_attribution_overlay.png` pair plus a
-captioned figure under the heatmap overlay in `--report-dir`'s `report.md`.
-
-```bash
-IMGFORENSICS_HEAD_ATTRIBUTION=0 imgforensics analyze image.jpg --report-dir out/
-```
-
-It is on by default and costs one extra forward and backward pass over the
-handful of 224 px crops the score already used — no second model, nothing to
-download. Measured on this project's RTX 2060 with the backbone already
-loaded: 27 ms to 91 ms per image for a one-crop 256 px image, 59 ms to
-149 ms for a four-crop 720x960 photograph. `IMGFORENSICS_HEAD_ATTRIBUTION=0`
-(or `false`/`no`/`off`) skips it.
-The score, the label and the heatmap come from the untouched no-grad path
-either way, so switching attribution on or off changes no number.
-
-**A saliency map is not a manipulation mask.** It is normalized to a maximum
-of 1 within its own image, so its values rank pixels against each other and
-mean nothing across images — a bright pixel marks evidence the classifier used
-for its *score*, not a claim that the pixel was edited. `dinov2_head` is a
-whole-image classifier, so on a fully generated image that evidence can sit
-anywhere, empty sky included. For "which pixels were manipulated", the
-localizers below are the right tool.
-
-## Localization (optional `ml` extra)
-
-Where the detectors answer *how* generated an image looks, the localizers
-answer *where*. Phase 4a registers two, both inference-only wrappers around
-released weights, both returning a per-pixel probability that a pixel was
-manipulated, plus `localizer_ensemble`, which combines their heatmaps. They
-are registered as normal detectors, so `analyze` and `benchmark` treat them
-like any other, but their `heatmap` is the primary output and the image-level
-score is derived from it.
-
-| detector | model | cue | license (code / weights) |
-|---|---|---|---|
-| `iml_vit` | [IML-ViT](https://github.com/SunnyHaze/IML-ViT) (arXiv:2307.14863), ViT-B/16 with windowed attention, a simple feature pyramid and an edge-supervised decoder head, trained on CASIA v2 | RGB pixels only | MIT / MIT |
-| `catnet_v2` | [CAT-Net v2](https://github.com/mjkwon2021/CAT-Net) (WACV 2021 / IJCV 2022), an HRNetV2-W48 RGB stream fused with a DCT stream, trained on CASIAv2 + FantasticReality + IMD2020 + tampCOCO + compRAISE | RGB pixels **and** the JPEG stream's quantized DCT coefficients and quantization table | Apache-2.0 / CC-BY-4.0 |
+Then fetch the localizer weights. Each command prints the model's license, `commercial_ok`
+flag, size and source and refuses to download without `--accept-license`; the file is verified
+against a recorded sha256 and lands in the gitignored `weights/`. **No third-party weights are
+committed to this repository.**
 
 ```bash
 imgforensics weights list                              # what is registered, and what is installed
-imgforensics weights fetch iml_vit --accept-license    # 350 MB, MIT, sha256-verified
-imgforensics weights fetch catnet_v2 --accept-license  # 873 MB, CC-BY-4.0, sha256-verified
-imgforensics analyze image.jpg --detector iml_vit --detector catnet_v2 --save-heatmaps out/
+imgforensics weights fetch iml_vit --accept-license    # 350 MB, MIT
+imgforensics weights fetch catnet_v2 --accept-license  # 873 MB, CC-BY-4.0
+imgforensics serve                                     # workbench at http://127.0.0.1:8000/
 ```
 
-Using `catnet_v2`'s weights requires **attributing CAT-Net** (CC-BY-4.0); see
-THIRD_PARTY_NOTICES.md.
-
-`weights fetch` prints the model's license, `commercial_ok` flag, size and
-source and refuses to download without `--accept-license`, exactly as
-`datasets fetch` does; the file is verified against a recorded sha256, is
-re-verified rather than re-downloaded on a second run, and lands in
-`weights/<name>/` (or wherever `IMGFORENSICS_WEIGHTS_DIR` points) — both
-gitignored. **Weights are never committed.** The two `weights` commands work
-without the `ml` extra installed: fetching a model and being able to run it
-are separate problems.
-
-### `iml_vit`: pixels only
-
-**Crop and pad, never resize — and never truncate.** IML-ViT is a 1024×1024
-model that reaches that size by zero-padding at the bottom-right, not by
-scaling, so a small image keeps its native pixel statistics. Upstream's own
-transform then *crops* anything larger than 1024 px to its top-left corner,
-which throws away most of a modern photograph; this wrapper instead runs
-overlapping 1024 px tiles at stride 768 and averages the overlaps, so every
-pixel is seen at native resolution and the returned heatmap covers the whole
-image at its original shape. The number of tiles used is reported in
-`details["tiles"]`.
-
-**The image-level score.** The paper and the released code report pixel
-metrics only, so there is no upstream rule to follow: this detector reports
-the mean of the top 1% of heatmap values. A plain mean would shrink with the
-manipulated region and call every small edit authentic; a plain max is one
-noisy pixel away from calling everything fake. `details` carries `max_prob`,
-`mean_prob` and `area_fraction_above_0.5` next to it, so the score can always
-be checked against the map it came from. **With no weights installed the
-localizer abstains** — score 0.5, label `uncertain`, and a `reason` naming
-the directory it looked in and the command that fills it — rather than
-failing the run.
-
-Measured on this project's RTX 2060 (6 GB), batch 1 under fp16 autocast:
-1.6 GB peak allocated / 2.6 GB peak reserved VRAM, and 0.3–0.5 s per 1024 px
-tile (the spread is GPU contention, not image size — a 256 px thumbnail costs
-the same forward pass as a 1024 px photograph, and an n-tile image costs n of
-them).
-
-**It does not survive diffusion inpainting.** On CocoGlide — the standard
-probe for exactly that — IML-ViT scores pixel F1@0.5 0.059, best-F1 0.486,
-AP 0.423, IoU 0.037 and an image-level AUC of 0.535, against a
-predict-everything trivial baseline of F1 0.355 / AP 0.252. It ranks
-manipulated pixels better than chance but almost never crosses 0.5 on a
-GLIDE edit, so it is a weak, badly-calibrated signal on this domain and must
-not be read as a verdict. Full tables in
-[docs/benchmarks/03_cocoglide_iml_vit.md](docs/benchmarks/03_cocoglide_iml_vit.md).
-
-### `catnet_v2`: the JPEG stream, not just the pixels
-
-CAT-Net's second stream reads the *quantized DCT coefficients* and the
-*quantization table* of the JPEG the image is stored in, so a region pasted
-in with a different compression history stands out even where the pixels
-look seamless. Two consequences follow, both of them upstream's design and
-both reproduced here:
-
-- **Non-JPEG input is re-encoded to a quality-100, 4:4:4 JPEG first** (in
-  memory), because the model has no other way to be fed. `details` records
-  `input_was_jpeg`, `jpeg_quality_estimate` (the input's own, from the
-  `metadata` signal's estimator) and `dct_source`, so a heatmap can never be
-  read without knowing which of the two paths produced it.
-- Reading those coefficients needs a JPEG entropy decoder. Upstream uses
-  `jpegio`, which publishes no Windows wheel and no wheel past CPython 3.10,
-  so this project decodes them in pure numpy/Python instead
-  (`imgforensics.localization._jpegcoef`: baseline and extended-sequential
-  Huffman JPEGs, chroma subsampling and restart intervals included;
-  progressive, arithmetic and 12-bit JPEGs are rejected by name and fall back
-  to the re-encode). It is checked against libjpeg two ways — dequantize +
-  inverse-DCT the decoded coefficients and compare to Pillow's own decoded
-  pixels (max abs error 1 grey level), and re-quantize those pixels and
-  compare back to the coefficients. **No new dependency was added.**
-
-Inference runs at full resolution up to 1024 px, padded to whole 8x8 blocks
-with 127.5 the way upstream's dataset does; anything larger is covered by
-1024 px tiles at stride 768, both multiples of 8 so a tile boundary never
-cuts a DCT block in half. The image-level score is the same top-1% rule as
-`iml_vit`, deliberately, so the two are comparable.
-
-**On CocoGlide it clearly beats `iml_vit`**: pixel F1@0.5 0.364 vs 0.059,
-best-F1 0.605 vs 0.486, AP 0.566 vs 0.423, IoU 0.288 vs 0.037, image-level
-AUC 0.666 vs 0.535 — and unlike `iml_vit` it also beats the
-predict-everything baseline at the fixed 0.5 threshold, not only on ranking.
-Read that as a lower bound rather than a like-for-like number: CocoGlide is
-PNG, so every image goes through the quality-100 re-encode and the DCT
-stream is reading a compression history this toolkit created. Cost on the
-RTX 2060: 1.0 GB peak allocated / 1.2 GB reserved at 1024 px (flat above one
-tile), 549 ms per 256 px image — of which roughly 340 ms is the Python JPEG
-decoder, not the network. Full tables in
-[docs/benchmarks/03_cocoglide_catnet.md](docs/benchmarks/03_cocoglide_catnet.md).
-
-### `localizer_ensemble`: both maps at once
-
-The two localizers read different evidence — one only the pixels, the other
-also the JPEG stream — so `localizer_ensemble` runs both and combines their
-heatmaps pixelwise. It scores the combined map with the same top-1% rule its
-members use, so its number belongs in the same benchmark column as theirs,
-and it reports `member_scores` and `member_elapsed_ms` in `details` so the
-combination can always be traced back to what went into it.
+Or stay on the command line:
 
 ```bash
-imgforensics analyze image.jpg --detector localizer_ensemble --save-heatmaps out/
-IMGFORENSICS_LOCALIZER_ENSEMBLE_MODE=max imgforensics analyze image.jpg --detector localizer_ensemble
+imgforensics analyze image.jpg
+imgforensics analyze image.jpg --report-dir out/
+imgforensics analyze image.jpg --json --save-heatmaps out/
 ```
 
-Three combination modes, chosen with `IMGFORENSICS_LOCALIZER_ENSEMBLE_MODE`
-(or the `mode=` constructor argument):
-
-- `mean` (default) — the pixelwise mean. Both members emit calibrated
-  probabilities, so a fixed 0.5 threshold on their mean still means what it
-  means for either member alone.
-- `max` — the pixelwise maximum: whichever member is more confident at each
-  pixel. Finds a region one member missed entirely, at the cost of inheriting
-  the other's false positives.
-- `rank_mean` — each map is replaced by its own per-image percentile rank
-  first, which equalizes members whose probabilities live on different
-  scales. **It discards both members' calibration:** a rank map's values are
-  uniform over [0, 1] by construction, so thresholding one at 0.5 marks the
-  upper half of the image whatever the image contains. Pixel AP and best-F1
-  stay meaningful under it; F1@0.5 and IoU@0.5 do not. Hence not the default.
-
-**Memory.** The ensemble owns its own member instances, so benchmarking
-`iml_vit`, `catnet_v2` and `localizer_ensemble` in one run loads each model
-twice. On a 6 GB card, give the ensemble its own `benchmark` invocation. A
-member with no weights installed is dropped, and with none of them installed
-the ensemble abstains the same way its members do.
-
-**Pixel metrics per robustness level.** The benchmark runner now records pixel
-metrics at every level whose perturbation keeps the pixel grid — `clean`,
-JPEG, WEBP and Gaussian noise — not only at `clean`, so the "## Pixel metrics"
-table carries a `level` column and a heatmap's quality can be read across
-recompression. Levels that resize, crop or re-share the image are still
-skipped: the manifest's mask is stored against the original geometry. The
-packaged `localization` suite is exactly the geometry-preserving half of the
-default one, with identical params, so every level in it carries pixel
-metrics:
+**The AI-generation head is not in this repository.** It is trained on datasets licensed for
+research use only, so it is research-only itself and is published separately under its own
+model card. Point `IMGFORENSICS_HEAD_DIR` at a downloaded checkpoint, or train your own:
 
 ```bash
-imgforensics benchmark manifest.jsonl --detector localizer_ensemble --robustness localization
+imgforensics train head --config configs/experiments/02_diverse_reals_augmented_only.yaml
+IMGFORENSICS_HEAD_DIR=weights/dinov2_head_02 imgforensics analyze image.jpg
 ```
 
-The CocoGlide comparison against the individual members is recorded in
-[docs/benchmarks/](docs/benchmarks/) once the run is done.
+Without a checkpoint `dinov2_head` **abstains** -- score 0.5, label `uncertain`, and a
+`reason` saying where it looked -- rather than failing the run, and every other tool still
+works. A localizer whose weights are missing does the same.
 
-## Fusion
+## How good is it, honestly
 
-`imgforensics.fusion` combines several detectors' scores into one calibrated
-probability with an abstain band, using a pure-numpy L2-regularized logistic
-stacking model (no scikit-learn, no torch) fitted on saved benchmark records:
+| What is measured | Test set | Result |
+|---|---|---|
+| Same-family generators (sanity check) | [Community Forensics val](docs/benchmarks/02_experiment_summary.md), 42 unseen generators, 1,000 images | AUC **1.000** |
+| Social media, its own train split seen | [WildRF test](docs/benchmarks/02_experiment_summary.md), 1,000 images | AUC **0.980**, FPR 0.137 at 0.5 |
+| Social media, genuinely unseen | [the same 1,000, WildRF removed from training](docs/benchmarks/06_experiment_03_summary.md) | AUC **0.804**, FPR **0.547** |
+| ... the same, after fusion with the signals | [experiment 03 fuser](docs/benchmarks/06_experiment_03_summary.md) | AUC 0.831, FPR 0.238; on the 20.2% it will call, balanced accuracy 0.887 |
+| Local diffusion edits, image level | [CocoGlide](docs/benchmarks/02_cocoglide.md), 1,024 images | head AUC 0.644 |
+| Local diffusion edits, pixel level | [CocoGlide masks](docs/benchmarks/03_cocoglide_catnet.md), 512 images | `catnet_v2` best-F1 **0.605**, [`iml_vit`](docs/benchmarks/03_cocoglide_iml_vit.md) 0.486 |
+| Recompression and rescaling | [15-level robustness suite](docs/benchmarks/01_val_dinov2.md) | AUC 1.000 through JPEG q50, 0.567 at quarter scale |
+
+**Same-family generators: 1.000, and it means less than it looks.** On 42 generators the head
+never saw, drawn from the same corpus as its training generators, it separates real from
+generated perfectly -- a sanity check, not a claim about the open world.
+[Experiment 01](docs/benchmarks/01_experiment_summary.md) reached the same 1.000 while calling
+99.9% of ordinary COCO photographs fake.
+
+**In-distribution social media: 0.980.** On the WildRF test split -- real and generated images
+taken from Reddit, Twitter and Facebook -- the shipped default head reaches AUC 0.980 at a
+13.7% false-positive rate on real photographs. WildRF's *train* split was in that head's
+training data, so this is a held-out set of images, not a held-out distribution
+([experiment 02](docs/benchmarks/02_experiment_summary.md)).
+
+**The genuine cross-dataset test: 0.804, and the failure is specific.**
+[Experiment 03](docs/benchmarks/06_experiment_03_summary.md) removes the WildRF train split and
+changes nothing else. The head still calls generated images generated (TPR 0.893 at 0.5) but
+calls **54.7% of platform-laundered real photographs fake**, while held-out COCO photographs
+stay at a 2.6% false-positive rate: it has learned to read platform re-encoding as evidence of
+generation. Fusing it with the seven signals cuts the false-positive rate to 23.8% and the
+calibration error from 0.216 to 0.044, at the cost of recall (89.3% to 73.8%); the abstain band
+then calls 202 of the 1,000 images -- 20.2%, at balanced accuracy 0.887 -- and hands the rest
+back as `uncertain`. One image in five answered, right about 89% of the time, is the honest
+number here. On the distribution it *has* seen, the same machinery is far stronger:
+[fusion 01](docs/benchmarks/04_fusion_wildrf.md) drops the false-positive rate from 13.7% to
+3.6% and calls 534 of 1,000 images at balanced accuracy 0.996.
+
+**Local edits: a whole-image head does not see them.** On CocoGlide (authentic COCO images
+against the same images locally inpainted by GLIDE) the head reaches AUC 0.644; a few percent
+of edited pixels do not move a whole-image score. That is the localizers' job, and they are
+only partly up to it: `catnet_v2` reaches pixel best-F1 0.605 and F1@0.5 0.364, `iml_vit` 0.486
+and 0.059, against a predict-everything baseline of F1 0.355. `catnet_v2` beats that baseline
+at the fixed 0.5 threshold as well as on ranking; `iml_vit` ranks manipulated pixels better
+than chance but almost never crosses 0.5 -- a calibration failure on top of a domain-transfer
+failure. Read `catnet_v2` as a lower bound: CocoGlide is PNG, so every image goes through a
+quality-100 re-encode first and its DCT stream reads a compression history this toolkit
+created. Full tables, with AP, IoU and a per-mask-size breakdown, are in
+[docs/benchmarks/](docs/benchmarks/).
+
+**Robustness: recompression is survivable, rescaling is not.** Across the 15-level suite the
+head holds AUC 1.000 from clean through JPEG quality 50, WEBP, noise, an 80% crop and the
+social re-share pipeline, and collapses to 0.567 at quarter-scale resize -- crop-never-resize
+has nothing left to crop once the image is smaller than the crop
+([`01_val_dinov2.md`](docs/benchmarks/01_val_dinov2.md)).
+
+**What this means for you.** This is a triage and evidence tool, not an oracle: the heatmaps,
+the attribution map and the per-tool cards are the product, and the fused score is a summary of
+them. A C2PA manifest, when present, is the most decisive thing in the report -- but a missing
+one proves nothing, since most images, AI-generated ones included, carry none. Laundering is
+the great destroyer: once a platform has re-encoded, resized and stripped an image, the
+metadata and JPEG-history signals go blind and the head starts reading the laundering itself,
+which is exactly what the 0.804 measures. And a fuser is a calibration layer fitted on one
+distribution -- the weights behind these numbers are WildRF's, not universal, so a different
+deployment needs `imgforensics fusion fit` run again on its own data.
+
+## How it works
+
+```
+core/ signals/ detectors/ localization/   one image in, a DetectionResult out
+                 |                        (score, label, details, heatmap, attribution)
+              fusion/                     calibrated stacking, abstain band, report builder
+                 |
+              service/                    sessions, tool catalogue, parameters, map tiles
+                 |
+                api/                      FastAPI over the service (extra: api)
+                 |
+              client                      the workbench: HTML, CSS, ES modules, no build
+```
+
+Alongside these live `data/` (dataset registry, manifests, bias audit), `eval/` (metrics,
+robustness suite, benchmark runner), `views/`, `utils/` and `cli.py`. The reasoning behind the
+layering is in [docs/design/01_toolbox_architecture.md](docs/design/01_toolbox_architecture.md).
+
+**Crop, never resize; augment always.** Every image reaches the backbone as native-resolution
+224 px crops; anything smaller is reflection-padded, never upscaled, because resizing
+low-passes exactly the high-frequency artifacts a detector keys on. Training views pass through
+random JPEG, WEBP, blur, downscale-upscale, noise and cut-out
+([`configs/augment_default.yaml`](configs/augment_default.yaml)), so the head cannot learn the
+training set's own JPEG history. Augmentation runs on a 2x crop window aligned to the image's
+16-pixel grid, and the policy is part of the cache key, so switching policies never reuses the
+wrong features.
+
+**A frozen backbone and a small head.** Features come once from a frozen DINOv2 ViT-B/14 (a
+self-supervised space separates real from generated better than a language-aligned one; CLIP
+ViT-L/14 is the registered comparison), read at several depths and cached per image, so
+changing the head costs no GPU time. Only a 1.06 M-parameter head trains on top. Training keeps
+the best validation AUC, early-stops, then fits a temperature and bias on the validation split
+-- a calibration that does not reduce the expected calibration error is not applied, and the
+checkpoint says so. The checkpoint also records each training manifest's license and the
+`commercial_ok` flag ANDed across them, the only place a training set's licensing survives the
+move from data to model. Beside its heatmap the head paints a Grad-CAM map taken on the
+*calibrated* logit, so the picture explains the number the report prints -- but **a saliency
+map is not a manipulation mask:** normalized within its own image, it ranks pixels against each
+other and means nothing across images, and on a fully generated image the evidence can sit
+anywhere, empty sky included. For "which pixels were edited", use the localizers.
+
+**Localizers, and a JPEG decoder written from scratch.** `iml_vit` reads RGB pixels only;
+`catnet_v2` also reads the JPEG stream's quantized DCT coefficients and quantization table, so
+a region pasted in with a different compression history stands out where the pixels look
+seamless. Both pad rather than scale, tile above 1024 px at stride 768 instead of truncating
+the way upstream does, and score an image as the mean of the top 1% of heatmap values -- a
+plain mean shrinks with the edited region, a plain max is one noisy pixel from calling
+everything fake. Non-JPEG input to `catnet_v2` is re-encoded to a quality-100 JPEG in memory,
+which `details` records so a heatmap is never read without knowing which path produced it.
+Reading coefficients needs an entropy decoder, and `jpegio` publishes no Windows wheel and none
+past CPython 3.10, so this project decodes baseline and extended-sequential JPEGs in pure
+numpy/Python and falls back to the re-encode for progressive, arithmetic and 12-bit files.
+**No new dependency was added.**
+
+**Stacking fusion that is allowed to say no.** `fusion fit` fits an L2-regularized logistic
+model over saved benchmark records -- no scikit-learn, no torch -- imputing a tool that did
+not run as abstaining at 0.5, so a fuser degrades gracefully with a subset of its tools
+present. A "real below low / fake above high / uncertain in between" band is fitted on a
+held-out split, and the search accepts only a band leaving enough held-out images outside it
+(the larger of `--min-outside-count` and `--min-outside-fraction`): a band supported by a
+handful of images is a loophole, not a fit. When none meets the target, the best is kept and
+`band target met` is reported as false.
+
+**A headless service and a thin client.** `imgforensics.service` computes no forensics; it
+holds the state a one-shot command does not need. `catalogue()` lists every tool with its
+parameters and whether its weights are installed, answered without importing torch.
+`AnalysisSession` loads one image once, runs tools lazily, caches each result under the
+parameters that produced it, and serves each map as a tiled pyramid, so a 12-megapixel heatmap
+never crosses the wire whole. `SessionStore` keeps sessions in memory behind a TTL and a cap,
+so a public deployment needs no database. The API and the workbench consume that same
+contract, which is why a benchmark table describes what the user sees. The service is importable
+directly -- `AnalysisSession(ForensicImage.from_path(path)).run("ela", {"quality": 80})` -- with
+no web framework anywhere near it.
+
+## Reference
+
+### Tools and their blind spots
+
+A signal's score is the probability the image is generated or manipulated (0 = confidently
+real, 1 = confidently fake); the label is `real`, `fake` or `uncertain`. **No signal alone
+should be read as a verdict** -- see `details` for the evidence. Every metadata- and
+JPEG-domain signal below shares one blind spot: it decays to uninformative once a platform has
+re-encoded, resized and stripped the image, which is why the table lists only what each one
+misses *in addition*. The literature behind each is in
+[docs/research/03_signals_provenance_evaluation.md](docs/research/03_signals_provenance_evaluation.md).
+
+| Signal | Reads | Blind spots beyond laundering |
+|---|---|---|
+| `metadata` | EXIF/XMP, PNG text chunks, Photoshop APP13, the embedded EXIF thumbnail, JPEG quantization tables; high on a known AI-generator or editor marker, or a thumbnail/image mismatch | Markers are only as good as the list of known tool names; with nothing usable left it abstains at 0.5 rather than guessing |
+| `ela` | Re-encodes at a fixed JPEG quality and diffs against the original | Bounded to [0.3, 0.65] -- an explanation aid, never a standalone verdict; blind on an already-uniformly-recompressed image |
+| `c2pa` | Any embedded C2PA manifest (`provenance` extra); high when signed as AI-generated, or when the signed content hash no longer matches | A missing manifest proves nothing -- most images, AI-generated ones included, carry none. An untrusted or self-signed signer scores 0.5, not "fake" |
+| `sd_watermark` | Decodes the DWT-DCT ("dwtDct") invisible watermark Stable Diffusion reference pipelines embed, against known payloads | Embeds in chroma only, so it survives neither a JPEG re-encode (even at quality 100, through chroma subsampling) nor a resize; covers the two reference-pipeline payloads, not every SD fork or later generator |
+| `copy_move` | Block-matching search (quantized zig-zag DCT features) for a region duplicated inside the same image, with a matched-region heatmap | Blind to a clone rotated or rescaled before pasting; repetitive textures (tiles, fences) are guarded by a minimum-distance rule and a shift-consistency check but are not impossible to fool. Finding no duplicate is not evidence of authenticity |
+| `jpeg_ghost` | Re-saves at a range of qualities and finds, per block, the quality whose re-save error is anomalously low compared to the rest (Farid's JPEG ghosts), with a heatmap | Bounded to [0.3, 0.7] like `ela` -- an explanation aid, never a verdict; needs JPEG-derived pixels |
+| `double_jpeg` | Whether the JPEG 8x8 blocking grid still starts at the image origin, plus a secondary-phase check for a masked older grid underneath (crop/composite detection); and, on JPEG input, whether the DCT coefficient histogram -- normalized by the file's own quantization step, so it measures a genuine second, coarser compression rather than how lossy the current one is -- shows aligned double-quantization periodicity | Quantization-history fingerprints, not proof of malicious editing. The histogram check catches only a *coarser-then-finer* compression (the other orders leave no detectable comb) and only on JPEG input; double compression is normal for any re-shared image, and a misaligned grid only proves a crop-then-resave happened |
+
+The three views (`luminance_gradient`: Sobel magnitude of the luma, optional pre-blur `radius`;
+`noise_residual`: luma minus its local median, `window` 3 or 5; `bit_planes`: one bit of the
+8-bit luma, `plane` 0-7) are pure numpy/Pillow and return score 0.5, label `uncertain`,
+`details["kind"] = "view"`. Because a 0.5 card on every image is noise, `analyze` skips them
+unless one is named with `--detector`, and `benchmark` refuses them outright.
+
+| Localizer | Model, trained on | Cue | License (code / weights) |
+|---|---|---|---|
+| `iml_vit` | [IML-ViT](https://github.com/SunnyHaze/IML-ViT) (arXiv:2307.14863), CASIA v2 | RGB pixels only | MIT / MIT |
+| `catnet_v2` | [CAT-Net v2](https://github.com/mjkwon2021/CAT-Net) (WACV 2021 / IJCV 2022), CASIAv2 + FantasticReality + IMD2020 + tampCOCO + compRAISE | RGB pixels **and** the JPEG stream's DCT coefficients and quantization table | Apache-2.0 / CC-BY-4.0 |
+| `localizer_ensemble` | both of the above, heatmaps combined pixelwise | both | as above |
+
+The ensemble drops a member whose weights are absent and abstains when none is left.
+`IMGFORENSICS_LOCALIZER_ENSEMBLE_MODE` picks `mean` (default -- both members emit calibrated
+probabilities, so a 0.5 threshold on their mean still means what it means for either alone),
+`max` (finds a region one member missed, inheriting the other's false positives) or
+`rank_mean`, which equalizes members on different scales but **discards both members'
+calibration**: a rank map is uniform on [0, 1] by construction, so a 0.5 threshold marks the
+upper half of any image, leaving pixel AP and best-F1 meaningful but not F1@0.5 or IoU@0.5.
+The ensemble owns its member instances, so benchmarking it beside them loads each model twice
+-- on a 6 GB card, give it its own run. Per-model VRAM and timing on this project's RTX 2060 are
+recorded in [docs/benchmarks/](docs/benchmarks/) and in
+[docs/ROADMAP.md](docs/ROADMAP.md)'s phase 4a result notes.
+
+### Commands
+
+```bash
+# analyze
+imgforensics analyze IMAGE [--json] [--detector NAME ...] [--save-heatmaps DIR] [--report-dir DIR] [--fuser fuser.json]
+imgforensics version
+
+# datasets, manifests, bias audit
+imgforensics datasets list | show NAME | recipe NAME
+imgforensics datasets fetch NAME --dest DIR --accept-license [--dry-run] [--variant full]
+imgforensics datasets prepare NAME --src DIR --out manifest.jsonl
+imgforensics datasets materialize "Community Forensics" --src DIR --out TREE [--max-rows N]
+imgforensics manifest build ROOT --dataset NAME --out manifest.jsonl
+imgforensics manifest sample IN --n N --out OUT
+imgforensics manifest merge A B ... --out OUT
+imgforensics manifest split IN --out-train TRAIN --out-val VAL [--by FIELD] [--val-fraction F] [--holdout GROUP]
+imgforensics manifest crop IN --out-dir DIR --out OUT --size N --mode center|tiles [--label real ...]
+imgforensics audit manifest.jsonl [--strict]
+
+# benchmark
+imgforensics benchmark manifest.jsonl [--detector NAME ...] [--all-signals] [--baselines] \
+    [--robustness default|localization|PATH|none] [--limit N] [--root DIR] \
+    [--out results.json] [--report report.md] [--workers N]
+
+# learned detector
+imgforensics features extract manifest.jsonl --cache-dir data/features [--backbone NAME] \
+    [--crop-mode center|grid|random] [--max-crops 4] [--views 2] \
+    [--augment configs/augment_default.yaml] [--workers N] [--device auto]
+imgforensics features info --cache-dir data/features
+imgforensics train head --config configs/head_dinov2.yaml [--epochs N] [--out DIR]
+imgforensics weights list
+imgforensics weights fetch NAME --accept-license
+
+# fusion
+imgforensics fusion fit results.json [more.json ...] --out weights/fuser.json \
+    [--level NAME] [--detector NAME ...] [--target-bacc 0.9] \
+    [--min-outside-count 20] [--min-outside-fraction 0.10]
+imgforensics fusion info weights/fuser.json
+imgforensics fusion eval results.json --fuser weights/fuser.json [--report eval.md]
+
+# serve, demo, tests
+imgforensics serve [--host 127.0.0.1] [--port 8000] [--fuser PATH] [--ttl-seconds 1800] [--max-sessions 32]
+imgforensics demo [--host 127.0.0.1] [--port 7860] [--fuser PATH] [--tool NAME ...] [--max-side 2048] [--share]
+pytest
+```
+
+An end-to-end pass -- benchmark, fit a fuser on the records, use it:
 
 ```bash
 imgforensics benchmark manifest.jsonl --all-signals --out results.json --robustness none
@@ -459,90 +323,51 @@ imgforensics analyze image.jpg --fuser weights/fuser.json   # or set IMGFORENSIC
 imgforensics fusion eval results.json --fuser weights/fuser.json --report eval.md
 ```
 
-`fusion eval` reports, per robustness level, each detector's own AUC / balanced accuracy /
-FPR / TPR alone, the same numbers for the fused verdict over every image, and again over just
-the images the fuser is willing to call (outside the abstain band, with the abstain rate) --
-the table [docs/benchmarks/04_fusion_wildrf.md](docs/benchmarks/04_fusion_wildrf.md) reports,
-now reproducible from a fitted fuser and saved benchmark results instead of an ad-hoc script.
+A manifest is JSON Lines of labeled images (path, label, source, generator, split, mask path,
+sha256, resolution, format, JPEG quality) plus a `*.meta.json` sidecar (dataset name, license,
+`commercial_ok`). `datasets fetch` prints the license, refuses to proceed without
+`--accept-license`, and never asks for or stores Kaggle or Hugging Face credentials -- a
+dataset needing one prints instructions and stops. `manifest crop` writes native-resolution
+crops, never a resize, closing a resolution gap between classes that would otherwise let a
+detector learn scene scale instead of generation artifacts. `benchmark` tunes each threshold on
+the manifest's val split, or marks the report "threshold tuned in-sample"; a score must be
+*strictly above* a threshold to count as a fake call, so a tool abstaining at 0.5 is not scored
+as calling every image fake. Pixel metrics are recorded only at levels that preserve the pixel
+grid (`clean`, JPEG, WEBP, noise), since a mask is stored against the original geometry, and
+`--robustness localization` selects exactly that half of the default suite
+([`robustness_default.yaml`](src/imgforensics/eval/robustness_default.yaml);
+metrics in [`imgforensics.eval.metrics`](src/imgforensics/eval/metrics.py)).
 
-Each detector's score is imputed as abstaining (0.5) when it did not run, so
-a fuser degrades gracefully with a subset of its detectors present; a "real
-below low / fake above high / uncertain in between" band is fitted on a
-held-out split so the fuser can say "not sure" instead of guessing.
-`imgforensics fusion info fuser.json` prints its weights, band and metrics
-(train/held-out AUC, ECE before/after calibration, abstain rate). The band search only
-accepts a band that leaves enough held-out images outside it -- the larger of
-`--min-outside-count` (default 20) and `--min-outside-fraction` (default 0.10) of the
-held-out split -- because a band supported by a handful of images is a loophole, not a
-fit; when no such band meets the target, the best one is kept and `band target met` is
-reported as false.
+### Environment variables
 
-`imgforensics analyze IMAGE --report-dir DIR` writes a self-contained report folder: `report.json`
-with every detector's score, label and details plus the fused verdict when a fuser is configured,
-`<detector>_heatmap.png` and `<detector>_overlay.png` for every detector that produced a heatmap,
-and `report.md` with one plain-language card per detector, the fused verdict first.
+| Variable | Effect |
+|---|---|
+| `IMGFORENSICS_HEAD_DIR` | Where `dinov2_head` looks for its checkpoint (default `weights/dinov2_head/`, gitignored) |
+| `IMGFORENSICS_WEIGHTS_DIR` | Where fetched weights and the Hub backbone cache live (default `weights/<name>/`; the DINOv2 backbone is about 350 MB, fetched on first use) |
+| `IMGFORENSICS_FUSER` | Default fuser for `analyze`, `serve` and `demo`, with `weights/fuser.json` as the last fallback |
+| `IMGFORENSICS_HEAD_ATTRIBUTION` | `0`/`false`/`no`/`off` skips the Grad-CAM map. On by default, costing one extra forward and backward pass over the crops the score already used -- 27 ms to 149 ms per image on this project's RTX 2060, no second model, nothing to download. Score, label and heatmap come from the untouched no-grad path either way, so switching it changes no number |
+| `IMGFORENSICS_LOCALIZER_ENSEMBLE_MODE` | `mean` (default), `max` or `rank_mean` for `localizer_ensemble` |
 
-## Service layer (Phase 6a)
+### Extras
 
-`imgforensics.service` is the headless layer an interactive client sits on -- the forensic
-workbench described in
-[docs/design/01_toolbox_architecture.md](docs/design/01_toolbox_architecture.md). It computes
-no forensics of its own: it holds the state a one-shot command does not need. `catalogue()`
-lists every registered tool with its category, kind, parameters and whether its weights are
-installed (answered without importing torch), so a client can draw a tool tree before running
-anything. `AnalysisSession` loads one image once and runs tools on it lazily, caching each
-result under the parameters it was produced with, and serves each map as a `MapPyramid` --
-levels down to 256 px, 256-pixel tiles on request -- so a 12-megapixel heatmap never crosses
-the wire whole. `SessionStore` keeps sessions in memory with a TTL and a cap, so a public
-demo needs no database.
+| Extra | Pulls in | Needed for |
+|---|---|---|
+| `ml` | `torch`, `torchvision`, `timm`, `safetensors` | `dinov2_head`, `iml_vit`, `catnet_v2`, feature extraction, training |
+| `api` | `fastapi`, `uvicorn`, `python-multipart` | `imgforensics serve` and the workbench |
+| `demo` | `gradio` | `imgforensics demo` |
+| `provenance` | `c2pa-python` | the `c2pa` signal |
+| `data` | `huggingface_hub`, `gdown`, `pyarrow` | `datasets fetch` and `datasets materialize` |
+| `dev` | `pytest`, `pytest-cov`, `ruff`, `mypy`, `httpx`, `cryptography` | running the test suite |
 
-```python
-from imgforensics.core.image import ForensicImage
-from imgforensics.service import AnalysisSession, catalogue
+The base install is torch-free and web-framework-free, and everything else imports and runs
+without any extra. The `weights` commands work without `ml`: fetching a model and being able to
+run it are separate problems. The `features` commands print an install hint and exit 1 when
+`ml` is missing.
 
-print([tool.name for tool in catalogue() if tool.installed])
-session = AnalysisSession(ForensicImage.from_path("image.jpg"), name="image.jpg")
-result = session.run("ela", {"quality": 80})  # cached per (tool, parameters)
-tile = session.maps("ela")["heatmap"].tile(level=0, x=0, y=0)
-```
+### API routes
 
-Tools that take a user-facing setting declare it as a `ParameterSpec` (name, type, range,
-default, description) and accept it as a constructor keyword argument: `ela.quality`,
-`localizer_ensemble.mode` and `dinov2_head.attribution` so far. Deployment settings -- a
-device, a weights directory -- are deliberately not parameters.
-
-### Views
-
-A view renders the image under one transform and claims nothing: score 0.5, label
-`uncertain`, `details["kind"] = "view"`, and the map as its heatmap. Three of them:
-`luminance_gradient` (Sobel gradient magnitude of the luma, with an optional pre-blur
-`radius`), `noise_residual` (luma minus its local median, `window` 3 or 5) and `bit_planes`
-(one bit of the 8-bit luma, `plane` 0-7). They are pure numpy/Pillow and need no extra.
-
-Because a 0.5 card on every image is noise, `imgforensics analyze` skips the views unless one
-is named -- `analyze image.jpg --detector luminance_gradient` -- and `imgforensics benchmark`
-refuses them outright, there being no verdict to score. `--save-heatmaps` and `--report-dir`
-treat a named view like any other tool.
-
-## API (optional `api` extra)
-
-`imgforensics.api` is HTTP over the service layer and nothing more: one FastAPI application
-whose routes map straight onto `catalogue()`, `AnalysisSession` and `SessionStore`, with JSON
-for the numbers and PNG for the pixels. It is what the web client in
-[docs/design/01_toolbox_architecture.md](docs/design/01_toolbox_architecture.md) talks to.
-
-```bash
-pip install -e ".[api]"
-imgforensics serve --host 127.0.0.1 --port 8000    # workbench at /, schema at /docs
-```
-
-`imgforensics serve` also serves the **workbench client** itself at `/`: a tool tree grouped by
-category, one shared pan/zoom across the original image and every open map (drawn from 256-pixel
-tiles, so a 12-megapixel heatmap costs a few PNGs instead of 48 MB), parameter sliders that
-re-run one tool 400 ms after they stop moving, per-tool and fused verdicts with the abstain band
-drawn on them, and the report download. It is plain HTML, CSS and ES-module JavaScript packaged
-inside `imgforensics.api` -- no build step, no Node, no CDN and no request to anywhere but this
-server, which is also all its Content-Security-Policy permits.
+`imgforensics serve` puts the workbench client at `/` and the JSON API under it, schema at
+`/docs`.
 
 | Method | Path | What it does |
 |---|---|---|
@@ -559,79 +384,73 @@ server, which is also all its Content-Security-Policy permits.
 ```bash
 BASE=http://127.0.0.1:8000
 SESSION=$(curl -sF file=@image.jpg $BASE/sessions | python -c "import json,sys; print(json.load(sys.stdin)['id'])")
-
-# run a tool: the response carries the score, the details, and a tile URL per map
 curl -s -X POST $BASE/sessions/$SESSION/tools/ela \
   -H 'Content-Type: application/json' -d '{"parameters": {"quality": 80}}'
-
-# fetch the top-left tile of that run's heatmap at full resolution
 curl -s -o tile.png $BASE/sessions/$SESSION/maps/ela/heatmap/0/0/0.png
 ```
 
-A tile URL names a tool and a map, never the parameters: it serves the map of the run that
-tool last made in the session, so re-running it with a new setting leaves a viewer's tile URLs
-valid. An unknown session, an expired one or an unregistered tool is a 404; a parameter the
-tool refuses or a tile outside its level is a 422, carrying the message the service wrote.
-
-`--fuser` picks the fuser for the fused-verdict route (`$IMGFORENSICS_FUSER` and then
-`weights/fuser.json` are the fallbacks, as for `analyze`); without one, that route is a 404 and
-everything else works. Two caveats worth stating plainly: **there is no authentication**, and
-**sessions are in-memory** -- they live in one process behind a TTL (`--ttl-seconds`) and a
-population cap (`--max-sessions`), so a restart loses them and two replicas do not share them.
-The default binding is loopback for that reason; anything reachable from a network wants a
+A tile URL names a tool and a map, never the parameters: it serves the map of that tool's last
+run, so changing a setting leaves a viewer's tile URLs valid. An unknown or expired session and
+an unregistered tool are 404; a refused parameter or an out-of-range tile is 422, carrying the
+message the service wrote. Without a fuser the fused-verdict route is a 404 and everything else
+works. Two caveats worth stating plainly: **there is no authentication**, and **sessions are
+in-memory** -- one process, a TTL and a population cap, so a restart loses them and two
+replicas do not share them. Hence the loopback default; anything network-reachable wants a
 reverse proxy in front of it.
 
-## Demo (optional `demo` extra)
+### Demo
 
-`imgforensics.demo` is one Gradio page over the same service layer -- the public stopgap of
-[docs/design/01_toolbox_architecture.md](docs/design/01_toolbox_architecture.md), section 4:
-a link anybody can open, deliberately thin, retired once the workbench client is deployed
-over the API.
+`imgforensics demo` is one Gradio page over the same service layer -- a link anybody can open,
+deliberately thin, retired once the workbench is deployed. Upload, tick tools, press Analyze:
+a summary (fused verdict with its band, one score bar per tool, then the caveats -- every tool
+that abstained with its reason, every tool that failed with its exception), a gallery of the
+same overlays `--report-dir` writes, and the JSON behind both. Views start unchecked; a tool
+whose weights are missing is greyed out rather than hidden; a tool that raises becomes an error
+card instead of taking the page down. One caveat: **uploads longer than 2048 px on a side are
+downscaled** (`--max-side`), and the page says so, because a public CPU deployment cannot run
+CAT-Net over a 12-megapixel photograph. The library itself never resizes, so `analyze` reads
+the original pixels; below the cap the upload's own encoded file is analyzed, so `metadata`,
+`c2pa` and the JPEG-history half of `double_jpeg` behave as they do from the CLI.
+[`spaces/`](spaces/) holds what a Hugging Face Space needs to run this page.
 
-```bash
-pip install -e ".[demo]"
-imgforensics demo --host 127.0.0.1 --port 7860        # add --fuser weights/fuser.json
-```
+## Data and licensing
 
-Upload an image, tick the tools, press Analyze. The page shows three things: a **summary**
-(the fused verdict with its abstain band first, then one score bar per tool, then the
-caveats -- every tool that abstained, with its reason, and every tool that failed, with its
-exception), a **gallery of overlays** drawn by the same code `analyze --report-dir` writes
-its PNGs with, and the **JSON** behind both. Views start unchecked because they claim no
-verdict; a tool whose weights are missing is listed and greyed out rather than hidden.
-`--tool NAME` (repeatable) narrows the list, and a tool that raises becomes an error card
-instead of taking the page down.
+This is a personal, non-commercial research project. That widens what it may *use* but not what
+it may *redistribute*: the repository is MIT-licensed, so anything committed must be
+MIT-compatible. **No third-party weights, images or datasets are committed here.** They are
+downloaded from their original sources through a gate that prints the license and requires
+explicit acceptance, and they keep their own terms.
 
-One caveat. **Uploads longer than 2048 px on a side are downscaled** before analysis
-(`--max-side`), and the page says so when it happens: a public CPU deployment cannot run
-CAT-Net over a 12-megapixel photograph. The library itself never resizes, so
-`imgforensics analyze` reads the original pixels. The upload's own encoded file is what
-gets analyzed below that cap, so `metadata`, `c2pa` and the JPEG-history half of
-`double_jpeg` run there exactly as they would from the CLI; they are only lost once a very
-large upload crosses the cap and the analysis runs on shrunk pixels with no encoded original
-behind them, which the summary's caveats then name.
+- Every dataset and model entry carries a `commercial_ok` flag, and a checkpoint inherits that
+  flag ANDed across its training manifests, so the licensing provenance of any trained model
+  can be traced back to its data. The flag is bookkeeping, not a plan: the project is and
+  stays non-commercial.
+- Research-only components stay isolated in a clearly marked optional extra used for
+  benchmarking only; the default install holds only permissively licensed pieces. The
+  `dinov2_head` checkpoint trained here is research-only for that reason, and is published
+  separately under its own model card rather than shipped.
+- TGIF/TGIF2 is CC BY-SA 4.0, and that ShareAlike clause is why no image set derived from it is
+  redistributed. The in-house inpainting set is built on COCO images with mixed Flickr
+  licenses, so only masks, prompts, image IDs and scripts are released -- never the images.
+- Using `catnet_v2`'s weights requires **attributing CAT-Net** (CC-BY-4.0). The exact wording,
+  with every external model, dataset and library and its license, is in
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-[`spaces/`](spaces/) holds what a Hugging Face Space needs to run this page: the entry
-point, a `requirements.txt` that installs the project from git with the `ml`, `demo` and
-`provenance` extras, and a README covering the license-gated weight fetch, the research-only
-AI-generation head, and the CPU hardware note.
+The full policy table, the disk plan and the list of what is deliberately never downloaded are
+in [docs/ROADMAP.md](docs/ROADMAP.md), section 7.
 
-## Roadmap
+## Roadmap and research notes
 
-See [docs/ROADMAP.md](docs/ROADMAP.md). Step-by-step runbooks for individual
-experiments (what to run, expected disk footprint, what to report) live in
-[docs/experiments/](docs/experiments/).
-
-## Research notes
-
-See [docs/research/](docs/research/).
+[docs/ROADMAP.md](docs/ROADMAP.md) is the build plan and the running results log, phase by
+phase. Runbooks for individual experiments are in [docs/experiments/](docs/experiments/), the
+benchmark tables in [docs/benchmarks/](docs/benchmarks/), the workbench design decision in
+[docs/design/01_toolbox_architecture.md](docs/design/01_toolbox_architecture.md), and the three
+literature surveys the plan derives from in [docs/research/](docs/research/).
 
 ## License
 
 The code in this repository is released under the MIT license, see [LICENSE](LICENSE).
-
-This is a personal, non-commercial research project. Third-party models, weights and
-datasets are not included in the repository; they are downloaded from their original sources
-and keep their own licenses, some of which permit research use only. See
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the current library list; models and
-datasets are added there as they are integrated.
+Third-party models, weights and datasets are not included in the repository; they are
+downloaded from their original sources and keep their own licenses, some of which permit
+research use only. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the current library
+list; models and datasets are added there as they are integrated.
