@@ -50,6 +50,31 @@ PerturbationKind = Literal[
 _DEFAULT_SOCIAL_MAX_SIDE = 1080
 _DEFAULT_SOCIAL_QUALITY = 80
 
+#: The perturbation kinds that leave every pixel where it was: they change what
+#: a pixel *is*, never where it sits or how many there are. A localizer's
+#: heatmap at one of these levels is still aligned with the manifest's stored
+#: mask, which is what makes pixel metrics comparable across them.
+_GEOMETRY_PRESERVING: frozenset[str] = frozenset({"clean", "jpeg", "webp", "gaussian_noise"})
+
+
+def preserves_geometry(kind: str) -> bool:
+    """Whether perturbation ``kind`` keeps the pixel grid it was given.
+
+    True for ``clean``, ``jpeg``, ``webp`` and ``gaussian_noise``; false for
+    ``resize``, ``resize_roundtrip``, ``center_crop`` and ``social``, all of
+    which move or drop pixels, so a mask drawn on the original image no longer
+    lines up with a heatmap computed on the perturbed one. Evaluating pixel
+    metrics at those levels would need the mask warped through the same
+    transform -- a different feature, and one that changes what the metric
+    means -- so they are simply skipped.
+
+    Args:
+        kind: A :data:`PerturbationKind` value. An unknown string is reported
+            as non-preserving, the safe answer for a kind this function has
+            not been taught about.
+    """
+    return kind in _GEOMETRY_PRESERVING
+
 
 class Perturbation(BaseModel):
     """A single named robustness-suite level.
@@ -123,14 +148,27 @@ class RobustnessSuite(BaseModel):
         return cls._from_yaml_text(Path(path).read_text(encoding="utf-8"))
 
     @classmethod
+    def _packaged(cls, filename: str) -> RobustnessSuite:
+        text = resources.files("imgforensics.eval").joinpath(filename).read_text(encoding="utf-8")
+        return cls._from_yaml_text(text)
+
+    @classmethod
     def default(cls) -> RobustnessSuite:
         """Load the packaged default suite (``eval/robustness_default.yaml``)."""
-        text = (
-            resources.files("imgforensics.eval")
-            .joinpath("robustness_default.yaml")
-            .read_text(encoding="utf-8")
-        )
-        return cls._from_yaml_text(text)
+        return cls._packaged("robustness_default.yaml")
+
+    @classmethod
+    def localization(cls) -> RobustnessSuite:
+        """Load the packaged localization suite (``eval/robustness_localization.yaml``).
+
+        The default suite's geometry-preserving levels and nothing else, so
+        every level in it carries pixel metrics (see
+        :func:`preserves_geometry`). Use it to ask how a localizer's *heatmap*
+        degrades under recompression and noise; use :meth:`default` to ask how
+        an image-level score survives the full re-share pipeline, resizes and
+        crops included.
+        """
+        return cls._packaged("robustness_localization.yaml")
 
     def apply(self, perturbation: Perturbation, image: ForensicImage) -> ForensicImage:
         """Apply one perturbation to ``image``, returning a new :class:`ForensicImage`.

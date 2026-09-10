@@ -91,6 +91,34 @@ def test_cli_benchmark_requires_at_least_one_detector(tmp_path: Path) -> None:
     assert result.exit_code != 0
 
 
+def test_cli_benchmark_accepts_the_localization_suite(tmp_path: Path) -> None:
+    manifest = _build_manifest(tmp_path)
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest.save(manifest_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "benchmark",
+            str(manifest_path),
+            "--robustness",
+            "localization",
+            "--limit",
+            "2",
+            "--detector",
+            "ela",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    # Every level of that suite is evaluated, and named in the report header.
+    assert "jpeg_q50" in result.stdout
+    assert "noise_5" in result.stdout
+    # None of the default suite's geometry-changing levels are in it.
+    assert "resize_0.5" not in result.stdout
+    assert "social_1080_q80" not in result.stdout
+
+
 def test_cli_benchmark_runs_with_workers(tmp_path: Path) -> None:
     manifest = _build_manifest(tmp_path)
     manifest_path = tmp_path / "manifest.jsonl"

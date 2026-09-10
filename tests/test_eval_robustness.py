@@ -13,7 +13,7 @@ from PIL import Image
 from pydantic import ValidationError
 
 from imgforensics.core.image import ForensicImage
-from imgforensics.eval.robustness import Perturbation, RobustnessSuite
+from imgforensics.eval.robustness import Perturbation, RobustnessSuite, preserves_geometry
 
 _SIZE = (96, 96)
 
@@ -43,10 +43,50 @@ def _forensic_image(seed: int, size: tuple[int, int] = _SIZE) -> ForensicImage:
     return ForensicImage.from_bytes(buffer.getvalue())
 
 
+_EXPECTED_LOCALIZATION_LEVELS = [
+    "clean",
+    "jpeg_q95",
+    "jpeg_q85",
+    "jpeg_q75",
+    "jpeg_q60",
+    "jpeg_q50",
+    "webp_q80",
+    "noise_2",
+    "noise_5",
+]
+
+
 def test_default_suite_has_expected_levels_in_order() -> None:
     suite = RobustnessSuite.default()
     assert [level.name for level in suite.levels] == _EXPECTED_LEVEL_ORDER
     assert suite.version == 1
+
+
+def test_localization_suite_is_the_geometry_preserving_half_of_the_default() -> None:
+    suite = RobustnessSuite.localization()
+
+    assert [level.name for level in suite.levels] == _EXPECTED_LOCALIZATION_LEVELS
+    assert suite.version == 1
+    assert all(preserves_geometry(level.kind) for level in suite.levels)
+
+
+def test_localization_levels_share_the_default_suites_params() -> None:
+    """A robustness row produced under one suite has to be comparable to the same
+    row under the other, so a level of the same name must be the same level.
+    """
+    default_levels = {level.name: level for level in RobustnessSuite.default().levels}
+
+    for level in RobustnessSuite.localization().levels:
+        assert level == default_levels[level.name]
+
+
+def test_preserves_geometry_splits_the_perturbation_kinds() -> None:
+    for kind in ("clean", "jpeg", "webp", "gaussian_noise"):
+        assert preserves_geometry(kind), kind
+    for kind in ("resize", "resize_roundtrip", "center_crop", "social"):
+        assert not preserves_geometry(kind), kind
+    # An unrecognized kind is reported as non-preserving, the safe answer.
+    assert not preserves_geometry("some_future_kind")
 
 
 def test_clean_returns_input_unchanged() -> None:

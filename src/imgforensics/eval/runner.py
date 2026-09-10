@@ -34,7 +34,7 @@ from imgforensics.eval.metrics import (
     best_threshold,
     roc_auc,
 )
-from imgforensics.eval.records import PixelRecord, ScoreRecord, _load_mask
+from imgforensics.eval.records import PixelRecord, ScoreRecord, record_pixel_metrics
 from imgforensics.eval.robustness import Perturbation, RobustnessSuite
 from imgforensics.eval.workers import WorkerTask, is_worker_eligible, run_worker_task
 from imgforensics.signals import SIGNAL_NAMES  # noqa: F401  (side effect: registers every signal)
@@ -120,9 +120,10 @@ class GroupRow:
 
 @dataclass
 class PixelRow:
-    """One detector's mean pixel metrics, averaged over every image with a mask."""
+    """One (detector, robustness level)'s mean pixel metrics, over every image with a mask."""
 
     detector: str
+    level: str
     n: int
     mean_f1_at_threshold: float
     mean_best_f1: float
@@ -268,25 +269,49 @@ class BenchmarkResult:
                 rows.append(GroupRow(detector, group, auc))
         return rows
 
-    def pixel_table(self) -> list[PixelRow] | None:
-        """Mean F1@0.5, best-F1, AP, IoU per detector, or ``None`` with no pixel records."""
+    def _level_sort_key(self, level: str) -> tuple[int, int, str]:
+        """Order levels the way the suite listed them, with ``clean`` always first."""
+        try:
+            index = self.levels.index(level)
+        except ValueError:
+            index = len(self.levels)
+        return (0 if level == _CLEAN_LEVEL_NAME else 1, index, level)
+
+    def pixel_table(self, level: str | None = None) -> list[PixelRow] | None:
+        """Mean F1@0.5, best-F1, AP, IoU per (detector, level), or ``None`` with no records.
+
+        Pixel records exist only at the geometry-preserving levels (see
+        :func:`imgforensics.eval.robustness.preserves_geometry`), so this has
+        one row per detector per such level. Rows are ordered by detector,
+        then by the suite's own level order with the clean level first.
+
+        Args:
+            level: Restrict to one robustness level; ``None`` (the default)
+                reports every level that has records. An unknown level yields
+                no rows rather than an error, so asking for a level a run did
+                not cover reads as "nothing was measured there".
+        """
         if not self.pixel_records:
             return None
+        selected = [r for r in self.pixel_records if level is None or r.level == level]
         rows: list[PixelRow] = []
-        for detector in sorted({r.detector for r in self.pixel_records}):
-            detector_records = [r for r in self.pixel_records if r.detector == detector]
-            rows.append(
-                PixelRow(
-                    detector=detector,
-                    n=len(detector_records),
-                    mean_f1_at_threshold=float(
-                        np.mean([r.metrics.f1_at_threshold for r in detector_records])
-                    ),
-                    mean_best_f1=float(np.mean([r.metrics.best_f1 for r in detector_records])),
-                    mean_ap=float(np.mean([r.metrics.ap for r in detector_records])),
-                    mean_iou=float(np.mean([r.metrics.iou for r in detector_records])),
+        for detector in sorted({r.detector for r in selected}):
+            detector_records = [r for r in selected if r.detector == detector]
+            for row_level in sorted({r.level for r in detector_records}, key=self._level_sort_key):
+                level_records = [r for r in detector_records if r.level == row_level]
+                rows.append(
+                    PixelRow(
+                        detector=detector,
+                        level=row_level,
+                        n=len(level_records),
+                        mean_f1_at_threshold=float(
+                            np.mean([r.metrics.f1_at_threshold for r in level_records])
+                        ),
+                        mean_best_f1=float(np.mean([r.metrics.best_f1 for r in level_records])),
+                        mean_ap=float(np.mean([r.metrics.ap for r in level_records])),
+                        mean_iou=float(np.mean([r.metrics.iou for r in level_records])),
+                    )
                 )
-            )
         return rows
 
     def timing_table(self) -> list[TimingRow]:
@@ -376,12 +401,15 @@ class BenchmarkResult:
         if pixel_rows:
             lines.append("## Pixel metrics")
             lines.append("")
-            lines.append("| detector | n | mean f1@0.5 | mean best-f1 | mean ap | mean iou |")
-            lines.append("|---|---|---|---|---|---|")
+            lines.append(
+                "| detector | level | n | mean f1@0.5 | mean best-f1 | mean ap | mean iou |"
+            )
+            lines.append("|---|---|---|---|---|---|---|")
             for prow in pixel_rows:
                 lines.append(
-                    f"| {prow.detector} | {prow.n} | {prow.mean_f1_at_threshold:.3f} | "
-                    f"{prow.mean_best_f1:.3f} | {prow.mean_ap:.3f} | {prow.mean_iou:.3f} |"
+                    f"| {prow.detector} | {prow.level} | {prow.n} | "
+                    f"{prow.mean_f1_at_threshold:.3f} | {prow.mean_best_f1:.3f} | "
+                    f"{prow.mean_ap:.3f} | {prow.mean_iou:.3f} |"
                 )
             lines.append("")
 
@@ -412,7 +440,12 @@ class BenchmarkResult:
             "missing_files": self.missing_files,
             "records": [asdict(r) for r in self.records],
             "pixel_records": [
-                {"entry_path": r.entry_path, "detector": r.detector, "metrics": asdict(r.metrics)}
+                {
+                    "entry_path": r.entry_path,
+                    "detector": r.detector,
+                    "level": r.level,
+                    "metrics": asdict(r.metrics),
+                }
                 for r in self.pixel_records
             ],
         }
@@ -420,7 +453,12 @@ class BenchmarkResult:
 
     @classmethod
     def load_json(cls, path: str | Path) -> BenchmarkResult:
-        """Load a result previously written by :meth:`save_json`."""
+        """Load a result previously written by :meth:`save_json`.
+
+        A pixel record written before pixel metrics were recorded off the
+        clean level carries no ``level``; it loads as ``"clean"``, the only
+        level such a file could have measured.
+        """
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         records = [ScoreRecord(**r) for r in data["records"]]
         pixel_records = [
@@ -428,6 +466,7 @@ class BenchmarkResult:
                 entry_path=r["entry_path"],
                 detector=r["detector"],
                 metrics=PixelMetrics(**r["metrics"]),
+                level=r.get("level", _CLEAN_LEVEL_NAME),
             )
             for r in data["pixel_records"]
         ]
@@ -485,35 +524,6 @@ def _partition_detectors(
     return worker_detectors, main_detectors
 
 
-def _record_pixel_metrics(
-    *,
-    entry: ManifestEntry,
-    perturbation: Perturbation,
-    instance: BaseDetector,
-    heatmap: np.ndarray | None,
-    resolved_root: Path,
-    pixel_records: list[PixelRecord],
-    missing_files: list[str],
-) -> None:
-    """Append a :class:`PixelRecord` when ``instance`` produced a heatmap at the clean level.
-
-    Shared by the sequential loop and the main-process (non-worker-detector)
-    loop below, so both handle a missing mask file identically.
-    """
-    if perturbation.kind != "clean" or entry.mask_path is None or heatmap is None:
-        return
-    mask_path = resolved_root / entry.mask_path
-    try:
-        mask = _load_mask(mask_path, heatmap.shape)
-    except OSError as exc:
-        missing_files.append(f"{entry.mask_path}: {exc}")
-        return
-    metrics = PixelMetrics.compute(mask, heatmap)
-    pixel_records.append(
-        PixelRecord(entry_path=entry.path, detector=instance.name, metrics=metrics)
-    )
-
-
 def _tune_threshold(
     records: list[ScoreRecord], detector: str, level: str, split: str | None, fixed_threshold: float
 ) -> float:
@@ -544,9 +554,14 @@ def run_benchmark(
     ``manifest.meta.root``) and loaded with :meth:`ForensicImage.from_path`.
     A missing image or mask file is recorded in the result's
     ``missing_files`` and skipped -- it does not abort the run. Pixel metrics
-    are computed only at the clean level (the only level where a heatmap and
-    the manifest's stored mask share the same geometry without needing to
-    warp the mask through the perturbation).
+    are computed at every level whose perturbation preserves the pixel grid
+    (:func:`imgforensics.eval.robustness.preserves_geometry`: clean, JPEG,
+    WEBP and Gaussian noise), each record tagged with the level it was
+    measured at, so a localizer's heatmap quality can be read across
+    recompression the way its score already is. Levels that resize, crop or
+    re-share the image are skipped: the manifest's stored mask is drawn
+    against the original geometry and would have to be warped through the
+    same transform to still mean anything.
 
     With ``config.workers <= 1`` (the default), every detector runs
     sequentially in this process, in the exact order ``config.detectors`` /
@@ -559,9 +574,10 @@ def run_benchmark(
     here exactly as before. Worker tasks complete out of order, so the
     records they return are merged with this process's own records and then
     sorted by ``(entry order, level order, detector order)`` -- the same
-    order the sequential path would have produced them in -- before
-    threshold tuning runs; the result's ``records``/``pixel_records`` are
-    therefore identical to the sequential path regardless of ``workers``.
+    order the sequential path would have produced them in, and the same key
+    for score and pixel records alike -- before threshold tuning runs; the
+    result's ``records``/``pixel_records`` are therefore identical to the
+    sequential path regardless of ``workers``.
 
     See :class:`BenchmarkConfig` for ``limit``/threshold-tuning behaviour.
     """
@@ -615,12 +631,12 @@ def run_benchmark(
                             elapsed_ms=result.elapsed_ms,
                         )
                     )
-                    _record_pixel_metrics(
+                    record_pixel_metrics(
                         entry=entry,
                         perturbation=perturbation,
-                        instance=instance,
+                        detector=instance.name,
                         heatmap=result.heatmap,
-                        resolved_root=resolved_root,
+                        root=resolved_root,
                         pixel_records=pixel_records,
                         missing_files=missing_files,
                     )
@@ -678,12 +694,12 @@ def run_benchmark(
                             elapsed_ms=result.elapsed_ms,
                         )
                     )
-                    _record_pixel_metrics(
+                    record_pixel_metrics(
                         entry=entry,
                         perturbation=perturbation,
-                        instance=instance,
+                        detector=instance.name,
                         heatmap=result.heatmap,
-                        resolved_root=resolved_root,
+                        root=resolved_root,
                         pixel_records=pixel_records,
                         missing_files=missing_files,
                     )
@@ -697,7 +713,13 @@ def run_benchmark(
                 detector_order[r.detector],
             )
         )
-        pixel_records.sort(key=lambda r: (entry_order[r.entry_path], detector_order[r.detector]))
+        pixel_records.sort(
+            key=lambda r: (
+                entry_order[r.entry_path],
+                level_order[r.level],
+                detector_order[r.detector],
+            )
+        )
 
     has_val_split = config.threshold_split == "val" and any(
         r.level == _CLEAN_LEVEL_NAME and r.split == "val" for r in records

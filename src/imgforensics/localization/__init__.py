@@ -10,12 +10,19 @@ pretrained weights these need, and is deliberately torch-free -- ``weights
 list`` and ``weights fetch`` work on a machine that cannot yet run the model.
 
 Importing this package registers the ``iml_vit`` and ``catnet_v2``
-localizers with :mod:`imgforensics.core.registry`, but only when the optional
-``ml`` extra is installed, so ``imgforensics analyze`` on a torch-free machine
-offers exactly the detectors it did before. Neither wrapper module imports
-torch at module scope, so the registration costs nothing at startup even where
-the extra *is* installed. This mirrors :mod:`imgforensics.detectors`' handling
-of ``dinov2_head``.
+localizers with :mod:`imgforensics.core.registry`, plus the
+``localizer_ensemble`` that combines them, but only when the optional ``ml``
+extra is installed, so ``imgforensics analyze`` on a torch-free machine offers
+exactly the detectors it did before. No wrapper module imports torch at module
+scope, so the registration costs nothing at startup even where the extra *is*
+installed. This mirrors :mod:`imgforensics.detectors`' handling of
+``dinov2_head``.
+
+:class:`~imgforensics.localization.ensemble.LocalizerEnsemble` is deliberately
+absent from ``__all__``: it exists only where its members do, and a name
+re-exported here would be missing on exactly the machines this package is
+careful to keep working. Import it from
+:mod:`imgforensics.localization.ensemble` directly.
 """
 
 from __future__ import annotations
@@ -32,10 +39,10 @@ from imgforensics.localization.weights import (
 )
 
 if is_ml_available():  # pragma: no cover - the branch taken depends on the install
-    # Side effect: registers the "catnet_v2" and "iml_vit" localizers.
-    # Imported here rather than at the top so the statement above decides
-    # whether it happens.
-    from imgforensics.localization import catnet, iml_vit  # noqa: F401
+    # Side effect: registers the "catnet_v2", "iml_vit" and
+    # "localizer_ensemble" localizers. Imported here rather than at the top so
+    # the statement above decides whether it happens.
+    from imgforensics.localization import catnet, ensemble, iml_vit  # noqa: F401
 
 __all__ = [
     "WEIGHTS",

@@ -1,0 +1,48 @@
+# Geometry-preserving robustness suite for the pixel-level localizers
+# (see imgforensics.eval.robustness, and RobustnessSuite.localization()).
+#
+# Every level here keeps the pixel grid it was given, so a manifest's stored
+# mask still lines up with the heatmap computed on the perturbed image and the
+# benchmark runner records pixel metrics at all of them -- which the default
+# suite's resize/crop/social levels do not allow. Each level's params are
+# identical to the level of the same name in robustness_default.yaml, so a
+# robustness row produced under one suite is comparable to the same row under
+# the other.
+#
+# The same reproducibility rule applies as to the default suite: changing any
+# value here changes what "robustness" means for every run that uses it, so
+# bump `version` whenever one changes and keep this file version-controlled
+# (see docs/ROADMAP.md, section 3, "reproducibility").
+version: 1
+
+levels:
+  - name: clean
+    kind: clean
+    params: {}
+
+  - name: jpeg_q95
+    kind: jpeg
+    params: { quality: 95 }
+  - name: jpeg_q85
+    kind: jpeg
+    params: { quality: 85 }
+  - name: jpeg_q75
+    kind: jpeg
+    params: { quality: 75 }
+  - name: jpeg_q60
+    kind: jpeg
+    params: { quality: 60 }
+  - name: jpeg_q50
+    kind: jpeg
+    params: { quality: 50 }
+
+  - name: webp_q80
+    kind: webp
+    params: { quality: 80 }
+
+  - name: noise_2
+    kind: gaussian_noise
+    params: { sigma: 2 }
+  - name: noise_5
+    kind: gaussian_noise
+    params: { sigma: 5 }

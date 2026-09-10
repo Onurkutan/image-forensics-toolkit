@@ -10,6 +10,7 @@ generative content.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import asdict
 from datetime import date
@@ -31,6 +32,17 @@ from imgforensics.signals import SIGNAL_NAMES
 
 _IMAGE_SIZE = (96, 96)
 
+#: Two levels that keep the pixel grid (so the manifest's masks still line up
+#: with a heatmap) and one that does not, which is what makes it useful for
+#: checking where pixel metrics are and are not recorded.
+_MIXED_GEOMETRY_SUITE = RobustnessSuite(
+    levels=[
+        Perturbation(name="clean", kind="clean", params={}),
+        Perturbation(name="jpeg_q75", kind="jpeg", params={"quality": 75}),
+        Perturbation(name="resize_0.5", kind="resize", params={"scale": 0.5}),
+    ]
+)
+
 #: pids recorded by :class:`_FakeLearnedDetector.predict` -- see
 #: ``test_workers_keep_non_signal_detectors_in_main_process`` below. A worker
 #: process would append to its own copy of this list, invisible here, so a
@@ -51,6 +63,22 @@ class _FakeLearnedDetector(BaseDetector):
     def predict(self, image: ForensicImage) -> DetectionResult:
         _FAKE_LEARNED_CALLS.append(os.getpid())
         return DetectionResult(detector=self.name, score=0.5, label="uncertain")
+
+
+@register("fake_heatmap_for_test")
+class _FakeHeatmapDetector(BaseDetector):
+    """Stands in for a pixel-level localizer: always returns an image-shaped
+    heatmap, so every (entry with a mask, geometry-preserving level) pair it is
+    run on must produce a :class:`~imgforensics.eval.records.PixelRecord`. Not
+    worker-eligible, so it exercises the main-process recording path.
+    """
+
+    name = "fake_heatmap_for_test"
+
+    def predict(self, image: ForensicImage) -> DetectionResult:
+        heatmap = np.zeros((image.height, image.width), dtype=np.float32)
+        heatmap[image.height // 4 : image.height // 2, image.width // 4 : image.width // 2] = 0.9
+        return DetectionResult(detector=self.name, score=0.6, label="uncertain", heatmap=heatmap)
 
 
 def _build_manifest(root: Path, *, with_splits: bool = False) -> Manifest:
@@ -267,6 +295,98 @@ def test_threshold_caveat_absent_with_val_split(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Pixel metrics per robustness level
+# ---------------------------------------------------------------------------
+
+
+def _heatmap_result(manifest: Manifest, **config_kwargs: object) -> BenchmarkResult:
+    config = BenchmarkConfig(
+        detectors=[_FakeHeatmapDetector.name], robustness=_MIXED_GEOMETRY_SUITE, **config_kwargs
+    )
+    return run_benchmark(manifest, config, root=Path(manifest.meta.root), progress=False)
+
+
+def test_pixel_metrics_are_recorded_at_every_geometry_preserving_level(
+    manifest: Manifest,
+) -> None:
+    result = _heatmap_result(manifest)
+
+    levels = {r.level for r in result.pixel_records}
+    assert levels == {"clean", "jpeg_q75"}
+    assert "resize_0.5" not in levels
+    # Two masked entries at each of the two levels.
+    assert len(result.pixel_records) == 4
+    assert {r.entry_path for r in result.pixel_records} == {"fake/f0.png", "fake/f1.png"}
+
+
+def test_pixel_table_has_one_row_per_detector_and_level(manifest: Manifest) -> None:
+    rows = _heatmap_result(manifest).pixel_table()
+
+    assert rows is not None
+    assert [(row.detector, row.level, row.n) for row in rows] == [
+        (_FakeHeatmapDetector.name, "clean", 2),
+        (_FakeHeatmapDetector.name, "jpeg_q75", 2),
+    ]
+
+
+def test_pixel_table_can_be_restricted_to_one_level(manifest: Manifest) -> None:
+    result = _heatmap_result(manifest)
+
+    jpeg_rows = result.pixel_table(level="jpeg_q75")
+    assert jpeg_rows is not None
+    assert [row.level for row in jpeg_rows] == ["jpeg_q75"]
+
+    assert result.pixel_table(level="resize_0.5") == []
+
+
+def test_markdown_pixel_table_carries_the_level_column(manifest: Manifest) -> None:
+    markdown = _heatmap_result(manifest).to_markdown()
+
+    assert "| detector | level | n | mean f1@0.5 | mean best-f1 | mean ap | mean iou |" in markdown
+    assert f"| {_FakeHeatmapDetector.name} | clean | 2 |" in markdown
+    assert f"| {_FakeHeatmapDetector.name} | jpeg_q75 | 2 |" in markdown
+
+
+def test_json_round_trip_preserves_the_pixel_level(manifest: Manifest, tmp_path: Path) -> None:
+    result = _heatmap_result(manifest)
+    out_path = tmp_path / "results.json"
+    result.save_json(out_path)
+
+    payload = json.loads(out_path.read_text(encoding="utf-8"))
+    assert {r["level"] for r in payload["pixel_records"]} == {"clean", "jpeg_q75"}
+
+    reloaded = BenchmarkResult.load_json(out_path)
+    assert [(r.entry_path, r.level, r.detector) for r in reloaded.pixel_records] == [
+        (r.entry_path, r.level, r.detector) for r in result.pixel_records
+    ]
+    assert reloaded.to_markdown() == result.to_markdown()
+
+
+def test_a_pixel_record_saved_without_a_level_loads_as_clean(
+    manifest: Manifest, tmp_path: Path
+) -> None:
+    """Result files written before pixel metrics were recorded off the clean
+    level have no ``level`` key; they must still load, as the level they were
+    in fact measured at.
+    """
+    result = _heatmap_result(manifest)
+    out_path = tmp_path / "results.json"
+    result.save_json(out_path)
+
+    payload = json.loads(out_path.read_text(encoding="utf-8"))
+    payload["pixel_records"] = [
+        {key: value for key, value in record.items() if key != "level"}
+        for record in payload["pixel_records"]
+    ]
+    out_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    reloaded = BenchmarkResult.load_json(out_path)
+
+    assert reloaded.pixel_records
+    assert {r.level for r in reloaded.pixel_records} == {"clean"}
+
+
+# ---------------------------------------------------------------------------
 # CPU parallelism (BenchmarkConfig.workers)
 # ---------------------------------------------------------------------------
 
@@ -287,6 +407,7 @@ def _score_key(record: object) -> tuple[object, ...]:
 def _pixel_key(record: object) -> tuple[object, ...]:
     return (
         record.entry_path,  # type: ignore[attr-defined]
+        record.level,  # type: ignore[attr-defined]
         record.detector,  # type: ignore[attr-defined]
         asdict(record.metrics),  # type: ignore[attr-defined]
     )
@@ -297,12 +418,7 @@ def test_workers_parallel_matches_sequential(manifest: Manifest) -> None:
     order, as the sequential ``workers=1`` path -- only ``elapsed_ms`` (wall-clock
     timing, deliberately excluded from the comparison) may differ.
     """
-    suite = RobustnessSuite(
-        levels=[
-            Perturbation(name="clean", kind="clean", params={}),
-            Perturbation(name="jpeg_q75", kind="jpeg", params={"quality": 75}),
-        ]
-    )
+    suite = _MIXED_GEOMETRY_SUITE
 
     def _run(workers: int) -> BenchmarkResult:
         config = BenchmarkConfig(
@@ -323,6 +439,8 @@ def test_workers_parallel_matches_sequential(manifest: Manifest) -> None:
     assert [_pixel_key(r) for r in parallel.pixel_records] == [
         _pixel_key(r) for r in sequential.pixel_records
     ]
+    # The worker path applies the same geometry rule as the sequential one.
+    assert {r.level for r in parallel.pixel_records} == {"clean", "jpeg_q75"}
 
 
 def test_workers_keep_non_signal_detectors_in_main_process(manifest: Manifest) -> None:

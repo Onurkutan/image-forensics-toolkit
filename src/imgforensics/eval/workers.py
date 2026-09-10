@@ -27,8 +27,7 @@ from imgforensics.core.base import BaseDetector
 from imgforensics.core.image import ForensicImage
 from imgforensics.data.manifest import ManifestEntry
 from imgforensics.eval.baselines import ConstantDetector, RandomDetector
-from imgforensics.eval.metrics import PixelMetrics
-from imgforensics.eval.records import PixelRecord, ScoreRecord, _load_mask
+from imgforensics.eval.records import PixelRecord, ScoreRecord, record_pixel_metrics
 from imgforensics.eval.robustness import Perturbation, RobustnessSuite
 from imgforensics.signals import SIGNAL_NAMES  # side effect: registers every signal detector
 
@@ -101,10 +100,13 @@ def run_worker_task(task: WorkerTask) -> WorkerResult:
     Runs every detector in ``task.detector_names`` (built and cached per
     worker process by :func:`_get_worker_detector`) against the perturbed
     image and returns plain, picklable :class:`~imgforensics.eval.records.ScoreRecord`
-    values. Heatmaps are dropped except at the clean level for an entry that
+    values. Heatmaps are dropped except at a geometry-preserving level (see
+    :func:`imgforensics.eval.robustness.preserves_geometry`) for an entry that
     carries a ``mask_path``, in which case
     :class:`~imgforensics.eval.metrics.PixelMetrics` are computed here (in the
-    worker) and returned as :class:`~imgforensics.eval.records.PixelRecord` values.
+    worker) by :func:`~imgforensics.eval.records.record_pixel_metrics` -- the
+    same function the main-process path calls -- and returned as
+    :class:`~imgforensics.eval.records.PixelRecord` values.
 
     A missing image is reported the same way the sequential runner reports
     one -- an entry appended to ``missing_files``, no records -- though in
@@ -142,17 +144,14 @@ def run_worker_task(task: WorkerTask) -> WorkerResult:
                 elapsed_ms=result.elapsed_ms,
             )
         )
-        heatmap = result.heatmap
-        if perturbation.kind == "clean" and entry.mask_path is not None and heatmap is not None:
-            mask_path = task.root / entry.mask_path
-            try:
-                mask = _load_mask(mask_path, heatmap.shape)
-            except OSError as exc:
-                missing_files.append(f"{entry.mask_path}: {exc}")
-                continue
-            metrics = PixelMetrics.compute(mask, heatmap)
-            pixel_records.append(
-                PixelRecord(entry_path=entry.path, detector=instance.name, metrics=metrics)
-            )
+        record_pixel_metrics(
+            entry=entry,
+            perturbation=perturbation,
+            detector=instance.name,
+            heatmap=result.heatmap,
+            root=task.root,
+            pixel_records=pixel_records,
+            missing_files=missing_files,
+        )
 
     return WorkerResult(records=records, pixel_records=pixel_records, missing_files=missing_files)

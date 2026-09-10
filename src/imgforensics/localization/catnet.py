@@ -93,6 +93,7 @@ from imgforensics.localization._jpegcoef import (
     UnsupportedJpegError,
     read_luma_coefficients,
 )
+from imgforensics.localization._scoring import TOP_FRACTION, top_fraction_score
 from imgforensics.localization.weights import weights_file
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing only, never at runtime
@@ -119,8 +120,9 @@ _DCT_VOLUME_MAX = 20
 _RGB_OFFSET = 127.5
 
 #: Fraction of the heatmap the image-level score averages over (see the module
-#: docstring); always at least one pixel.
-_TOP_FRACTION = 0.01
+#: docstring); always at least one pixel. Shared with every other localizer
+#: through :mod:`imgforensics.localization._scoring`.
+_TOP_FRACTION = TOP_FRACTION
 
 #: Probability above which a pixel counts as manipulated, matching this
 #: project's pixel metrics (:func:`imgforensics.eval.metrics.pixel_f1`).
@@ -398,12 +400,7 @@ class CATNetLocalizer(BaseDetector):
     @staticmethod
     def _score_from(heatmap: np.ndarray) -> float:
         """Mean of the top :data:`_TOP_FRACTION` of ``heatmap``'s values."""
-        flat = heatmap.reshape(-1)
-        if flat.size == 0:  # pragma: no cover - ForensicImage always has pixels
-            return _ABSTAIN_SCORE
-        keep = max(1, int(round(flat.size * _TOP_FRACTION)))
-        top = np.partition(flat, flat.size - keep)[flat.size - keep :]
-        return float(np.clip(top.mean(), 0.0, 1.0))
+        return top_fraction_score(heatmap, _TOP_FRACTION)
 
     def _quality_estimate(self, image: ForensicImage) -> int | None:
         """The input's own JPEG quality, or ``None`` when it was not a JPEG.

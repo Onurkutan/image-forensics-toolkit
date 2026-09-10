@@ -383,7 +383,11 @@ def benchmark(
         str,
         typer.Option(
             "--robustness",
-            help="'default' (packaged suite), a YAML suite path, or 'none' (clean level only).",
+            help=(
+                "'default' (packaged suite), 'localization' (its geometry-preserving "
+                "levels only, so pixel metrics are reported at every one of them), "
+                "a YAML suite path, or 'none' (clean level only)."
+            ),
         ),
     ] = "default",
     limit: Annotated[
@@ -435,6 +439,8 @@ def benchmark(
 
     if robustness == "default":
         suite = RobustnessSuite.default()
+    elif robustness == "localization":
+        suite = RobustnessSuite.localization()
     elif robustness == "none":
         suite = None
     else:

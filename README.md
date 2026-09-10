@@ -241,9 +241,10 @@ fact survives the move from data to model.
 Where the detectors answer *how* generated an image looks, the localizers
 answer *where*. Phase 4a registers two, both inference-only wrappers around
 released weights, both returning a per-pixel probability that a pixel was
-manipulated. They are registered as normal detectors, so `analyze` and
-`benchmark` treat them like any other, but their `heatmap` is the primary
-output and the image-level score is derived from it.
+manipulated, plus `localizer_ensemble`, which combines their heatmaps. They
+are registered as normal detectors, so `analyze` and `benchmark` treat them
+like any other, but their `heatmap` is the primary output and the image-level
+score is derived from it.
 
 | detector | model | cue | license (code / weights) |
 |---|---|---|---|
@@ -348,6 +349,59 @@ RTX 2060: 1.0 GB peak allocated / 1.2 GB reserved at 1024 px (flat above one
 tile), 549 ms per 256 px image — of which roughly 340 ms is the Python JPEG
 decoder, not the network. Full tables in
 [docs/benchmarks/03_cocoglide_catnet.md](docs/benchmarks/03_cocoglide_catnet.md).
+
+### `localizer_ensemble`: both maps at once
+
+The two localizers read different evidence — one only the pixels, the other
+also the JPEG stream — so `localizer_ensemble` runs both and combines their
+heatmaps pixelwise. It scores the combined map with the same top-1% rule its
+members use, so its number belongs in the same benchmark column as theirs,
+and it reports `member_scores` and `member_elapsed_ms` in `details` so the
+combination can always be traced back to what went into it.
+
+```bash
+imgforensics analyze image.jpg --detector localizer_ensemble --save-heatmaps out/
+IMGFORENSICS_LOCALIZER_ENSEMBLE_MODE=max imgforensics analyze image.jpg --detector localizer_ensemble
+```
+
+Three combination modes, chosen with `IMGFORENSICS_LOCALIZER_ENSEMBLE_MODE`
+(or the `mode=` constructor argument):
+
+- `mean` (default) — the pixelwise mean. Both members emit calibrated
+  probabilities, so a fixed 0.5 threshold on their mean still means what it
+  means for either member alone.
+- `max` — the pixelwise maximum: whichever member is more confident at each
+  pixel. Finds a region one member missed entirely, at the cost of inheriting
+  the other's false positives.
+- `rank_mean` — each map is replaced by its own per-image percentile rank
+  first, which equalizes members whose probabilities live on different
+  scales. **It discards both members' calibration:** a rank map's values are
+  uniform over [0, 1] by construction, so thresholding one at 0.5 marks the
+  upper half of the image whatever the image contains. Pixel AP and best-F1
+  stay meaningful under it; F1@0.5 and IoU@0.5 do not. Hence not the default.
+
+**Memory.** The ensemble owns its own member instances, so benchmarking
+`iml_vit`, `catnet_v2` and `localizer_ensemble` in one run loads each model
+twice. On a 6 GB card, give the ensemble its own `benchmark` invocation. A
+member with no weights installed is dropped, and with none of them installed
+the ensemble abstains the same way its members do.
+
+**Pixel metrics per robustness level.** The benchmark runner now records pixel
+metrics at every level whose perturbation keeps the pixel grid — `clean`,
+JPEG, WEBP and Gaussian noise — not only at `clean`, so the "## Pixel metrics"
+table carries a `level` column and a heatmap's quality can be read across
+recompression. Levels that resize, crop or re-share the image are still
+skipped: the manifest's mask is stored against the original geometry. The
+packaged `localization` suite is exactly the geometry-preserving half of the
+default one, with identical params, so every level in it carries pixel
+metrics:
+
+```bash
+imgforensics benchmark manifest.jsonl --detector localizer_ensemble --robustness localization
+```
+
+The CocoGlide comparison against the individual members is recorded in
+[docs/benchmarks/](docs/benchmarks/) once the run is done.
 
 ## Fusion
 

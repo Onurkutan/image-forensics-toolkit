@@ -86,13 +86,17 @@ def test_run_worker_task_supports_baseline_names(tmp_path: Path) -> None:
     assert 0.0 <= scores["random"] <= 1.0
 
 
-def test_run_worker_task_computes_pixel_metrics_for_masked_clean_entry(tmp_path: Path) -> None:
-    natural_like_image(size=(64, 64), seed=3).save(tmp_path / "img.png", format="PNG")
+def _masked_image(tmp_path: Path, seed: int) -> ManifestEntry:
+    """Write a 64x64 PNG plus its mask under ``tmp_path`` and return the entry."""
+    natural_like_image(size=(64, 64), seed=seed).save(tmp_path / "img.png", format="PNG")
     mask = np.zeros((64, 64), dtype=np.uint8)
     mask[10:40, 10:40] = 255
     Image.fromarray(mask, mode="L").save(tmp_path / "mask.png")
+    return _masked_png_entry("mask.png")
 
-    entry = _masked_png_entry("mask.png")
+
+def test_run_worker_task_computes_pixel_metrics_for_masked_clean_entry(tmp_path: Path) -> None:
+    entry = _masked_image(tmp_path, seed=3)
     task = WorkerTask(root=tmp_path, entry=entry, perturbation=_CLEAN, detector_names=("ela",))
 
     result = run_worker_task(task)
@@ -100,20 +104,35 @@ def test_run_worker_task_computes_pixel_metrics_for_masked_clean_entry(tmp_path:
     assert len(result.pixel_records) == 1
     assert result.pixel_records[0].detector == "ela"
     assert result.pixel_records[0].entry_path == "img.png"
+    assert result.pixel_records[0].level == "clean"
 
 
-def test_run_worker_task_skips_pixel_metrics_off_the_clean_level(tmp_path: Path) -> None:
-    natural_like_image(size=(64, 64), seed=4).save(tmp_path / "img.png", format="PNG")
-    mask = np.zeros((64, 64), dtype=np.uint8)
-    mask[10:40, 10:40] = 255
-    Image.fromarray(mask, mode="L").save(tmp_path / "mask.png")
-
-    entry = _masked_png_entry("mask.png")
+def test_run_worker_task_computes_pixel_metrics_at_a_geometry_preserving_level(
+    tmp_path: Path,
+) -> None:
+    """A JPEG re-encode leaves every pixel where it was, so the stored mask still
+    lines up with the heatmap and the record is tagged with that level.
+    """
+    entry = _masked_image(tmp_path, seed=4)
     jpeg_level = Perturbation(name="jpeg_q75", kind="jpeg", params={"quality": 75})
     task = WorkerTask(root=tmp_path, entry=entry, perturbation=jpeg_level, detector_names=("ela",))
 
     result = run_worker_task(task)
 
+    assert len(result.pixel_records) == 1
+    assert result.pixel_records[0].level == "jpeg_q75"
+
+
+def test_run_worker_task_skips_pixel_metrics_when_the_level_moves_pixels(tmp_path: Path) -> None:
+    entry = _masked_image(tmp_path, seed=7)
+    resize_level = Perturbation(name="resize_0.5", kind="resize", params={"scale": 0.5})
+    task = WorkerTask(
+        root=tmp_path, entry=entry, perturbation=resize_level, detector_names=("ela",)
+    )
+
+    result = run_worker_task(task)
+
+    assert len(result.records) == 1  # the score record is unaffected
     assert result.pixel_records == []
 
 

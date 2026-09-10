@@ -80,6 +80,7 @@ from imgforensics.core.image import ForensicImage
 from imgforensics.core.registry import register
 from imgforensics.core.types import DetectionResult, label_from_score
 from imgforensics.data.acquire import _sha256_of_file
+from imgforensics.localization._scoring import TOP_FRACTION, top_fraction_score
 from imgforensics.localization.weights import weights_file
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing only, never at runtime
@@ -98,8 +99,9 @@ _MEAN = (0.485, 0.456, 0.406)
 _STD = (0.229, 0.224, 0.225)
 
 #: Fraction of the heatmap the image-level score averages over (see the module
-#: docstring); always at least one pixel.
-_TOP_FRACTION = 0.01
+#: docstring); always at least one pixel. Shared with every other localizer
+#: through :mod:`imgforensics.localization._scoring`.
+_TOP_FRACTION = TOP_FRACTION
 
 #: Probability above which a pixel counts as manipulated, matching the
 #: threshold used in upstream's demo notebook and in this project's pixel
@@ -297,12 +299,7 @@ class IMLViTLocalizer(BaseDetector):
     @staticmethod
     def _score_from(heatmap: np.ndarray) -> float:
         """Mean of the top :data:`_TOP_FRACTION` of ``heatmap``'s values."""
-        flat = heatmap.reshape(-1)
-        if flat.size == 0:  # pragma: no cover - ForensicImage always has pixels
-            return _ABSTAIN_SCORE
-        keep = max(1, int(round(flat.size * _TOP_FRACTION)))
-        top = np.partition(flat, flat.size - keep)[flat.size - keep :]
-        return float(np.clip(top.mean(), 0.0, 1.0))
+        return top_fraction_score(heatmap, _TOP_FRACTION)
 
     def predict(self, image: ForensicImage) -> DetectionResult:
         """Localize manipulated regions, or abstain when no weights are installed."""
