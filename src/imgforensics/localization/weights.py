@@ -115,6 +115,27 @@ WEIGHTS: dict[str, WeightSpec] = {
             "downloaded on first use, never committed"
         ),
     ),
+    "catnet_v2": WeightSpec(
+        name="catnet_v2",
+        model="CAT-Net v2 (CAT_full, RGB + DCT streams)",
+        method="gdrive",
+        url_or_gdrive_id="1tyOKVdx6UMys2OcNpUj9r6scxNIpcoLE",
+        filename="CAT_full_v2.pth.tar",
+        sha256="f82aaafdd1142775231feedcea0bb7027f7370561d9e8d107465454001865989",
+        size_mb=873.1,
+        license="CC-BY-4.0",
+        commercial_ok=True,
+        source=(
+            "mjkwon2021/CAT-Net, README.md -> Google Drive folder "
+            "14uNqj46505MQc3swBQgbaiPVAWtNChbz ('trained weight') -> "
+            "CAT_full_v2.pth.tar. That folder entry is a Drive *shortcut* "
+            "(id 1anexqI_JlkO41wx7MgkRLf34VnpIzPw), which gdown cannot "
+            "follow -- it reports the file as owner-only -- so the id above "
+            "is the shortcut's target, read from the redirect its /view page "
+            "issues. The weights are CC-BY-4.0, so using them requires "
+            "attributing CAT-Net; downloaded on first use, never committed"
+        ),
+    ),
 }
 
 

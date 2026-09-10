@@ -69,6 +69,20 @@ without that flag, verifies the sha256 recorded in
 | Model | File | License | commercial_ok | Source |
 |---|---|---|---|---|
 | IML-ViT (CASIAv2-trained release) | `iml-vit_checkpoint.pth`, 350.2 MB, sha256 `7631fe85...26cce4` | MIT (Copyright (c) 2023 Xiaochen Ma) | yes | `SunnyHaze/IML-ViT`, `checkpoints/ckpt_download_page.md` -> Google Drive file id `1xXJGJPW1i5j9Pc1JKd7fJmIAQkvt9jY7`; downloaded on first use, never committed |
+| CAT-Net v2 (CAT_full, RGB + DCT streams) | `CAT_full_v2.pth.tar`, 873.1 MB, sha256 `f82aaafd...865989` | CC-BY-4.0 | yes, **with attribution** | `mjkwon2021/CAT-Net`, `README.md` -> Google Drive folder `14uNqj46505MQc3swBQgbaiPVAWtNChbz` ('trained weight'). That folder entry is a Drive *shortcut* (`1anexqI_JlkO41wx7MgkRLf34VnpIzPw`) which `gdown` cannot follow, so the registry records its target, `1tyOKVdx6UMys2OcNpUj9r6scxNIpcoLE`; downloaded on first use, never committed |
+
+**CC-BY-4.0 attribution for the CAT-Net weights.** `CAT_full_v2.pth.tar` is
+licensed CC-BY-4.0 by its authors, which permits commercial use *provided
+attribution is given*. Anything built on `catnet_v2`'s output must credit:
+
+> CAT-Net (Myung-Joon Kwon, In-Jae Yu, Seung-Hun Nam, Heung-Kyu Lee),
+> "CAT-Net: Compression Artifact Tracing Network for Detection and
+> Localization of Image Splicing", WACV 2021, and "Learning JPEG Compression
+> Artifacts for Image Manipulation Detection and Localization", IJCV 2022 --
+> https://github.com/mjkwon2021/CAT-Net -- weights licensed CC-BY-4.0.
+
+Upstream also notes that users remain responsible for the copyrights and
+licenses of the original images its training datasets were built from.
 
 ## Development dependencies
 
@@ -107,9 +121,26 @@ from `facebookresearch/detectron2` (Apache-2.0), as the upstream file
 states; both licenses are permissive and both are recorded in the file
 header.
 
+**`CAT-Net`**: another research repository with nothing to depend on. Its
+model definition sits behind a `yacs` configuration object and its dataset
+pipeline imports `jpegio` (a C extension around libjpeg) and `torch_dct`;
+none of that is needed for inference. The two model files were vendored with
+the configuration folded in as a literal, the ImageNet/DCT pretraining hooks
+and every training path removed, and no new dependency added -- the JPEG
+coefficients the model's second stream needs are decoded by
+`src/imgforensics/localization/_jpegcoef.py`, written for this project
+(`jpegio` ships no Windows wheel and none for CPython above 3.10). Module and
+parameter names are unchanged, so `CAT_full_v2.pth.tar` loads with
+`strict=True`. The upstream repository is Apache-2.0, which requires
+retaining its notices and stating changes: each vendored file carries the
+license text, the upstream Microsoft/HRNet MIT header it was built on, and a
+list of exactly what was modified.
+
 | File | Vendored from | License | commercial_ok |
 |---|---|---|---|
 | `src/imgforensics/signals/_vendor/dwtdct.py` | `ShieldMnt/invisible-watermark`, `imwatermark/maxDct.py` (`EmbedMaxDct`, the `dwtDct` method) | MIT (see the file's header for the full upstream notice) | yes |
 | `src/imgforensics/localization/_vendor/iml_vit/vit.py` | `SunnyHaze/IML-ViT` @ `07dd2be0f4ea27a5c97c9fa5ffbe236733833eac`, `modules/window_attention_ViT.py` | MIT, with parts from `facebookresearch/detectron2` (Apache-2.0) | yes |
 | `src/imgforensics/localization/_vendor/iml_vit/decoder.py` | `SunnyHaze/IML-ViT` @ `07dd2be0f4ea27a5c97c9fa5ffbe236733833eac`, `modules/decoderhead.py` | MIT (head design credited upstream to NVlabs/SegFormer) | yes |
 | `src/imgforensics/localization/_vendor/iml_vit/model.py` | `SunnyHaze/IML-ViT` @ `07dd2be0f4ea27a5c97c9fa5ffbe236733833eac`, `iml_vit_model.py` | MIT | yes |
+| `src/imgforensics/localization/_vendor/catnet/hrnet.py` | `mjkwon2021/CAT-Net` @ `331b8059c3f55efec1d9075de79dd153413f2061`, `lib/models/network_CAT.py` (the HRNet blocks) | Apache-2.0, with the file's own MIT header (Copyright (c) Microsoft, written by Ke Sun) retained | yes |
+| `src/imgforensics/localization/_vendor/catnet/network.py` | `mjkwon2021/CAT-Net` @ `331b8059c3f55efec1d9075de79dd153413f2061`, `lib/models/network_CAT.py` + `experiments/CAT_full.yaml` | Apache-2.0, with the same MIT header retained | yes |

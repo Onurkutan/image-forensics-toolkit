@@ -234,29 +234,37 @@ fact survives the move from data to model.
 ## Localization (optional `ml` extra)
 
 Where the detectors answer *how* generated an image looks, the localizers
-answer *where*. The first one (Phase 4a) is **`iml_vit`**: inference on the
-released [IML-ViT](https://github.com/SunnyHaze/IML-ViT) weights (MIT,
-arXiv:2307.14863) — a plain ViT-B/16 with windowed attention, a simple
-feature pyramid and an edge-supervised decoder head, trained on CASIA v2 —
-which returns a per-pixel probability that a pixel was manipulated. It is
-registered as a normal detector, so `analyze` and `benchmark` treat it like
-any other, but its `heatmap` is the primary output and the image-level score
-is derived from it.
+answer *where*. Phase 4a registers two, both inference-only wrappers around
+released weights, both returning a per-pixel probability that a pixel was
+manipulated. They are registered as normal detectors, so `analyze` and
+`benchmark` treat them like any other, but their `heatmap` is the primary
+output and the image-level score is derived from it.
+
+| detector | model | cue | license (code / weights) |
+|---|---|---|---|
+| `iml_vit` | [IML-ViT](https://github.com/SunnyHaze/IML-ViT) (arXiv:2307.14863), ViT-B/16 with windowed attention, a simple feature pyramid and an edge-supervised decoder head, trained on CASIA v2 | RGB pixels only | MIT / MIT |
+| `catnet_v2` | [CAT-Net v2](https://github.com/mjkwon2021/CAT-Net) (WACV 2021 / IJCV 2022), an HRNetV2-W48 RGB stream fused with a DCT stream, trained on CASIAv2 + FantasticReality + IMD2020 + tampCOCO + compRAISE | RGB pixels **and** the JPEG stream's quantized DCT coefficients and quantization table | Apache-2.0 / CC-BY-4.0 |
 
 ```bash
 imgforensics weights list                              # what is registered, and what is installed
 imgforensics weights fetch iml_vit --accept-license    # 350 MB, MIT, sha256-verified
-imgforensics analyze image.jpg --detector iml_vit --save-heatmaps out/
+imgforensics weights fetch catnet_v2 --accept-license  # 873 MB, CC-BY-4.0, sha256-verified
+imgforensics analyze image.jpg --detector iml_vit --detector catnet_v2 --save-heatmaps out/
 ```
+
+Using `catnet_v2`'s weights requires **attributing CAT-Net** (CC-BY-4.0); see
+THIRD_PARTY_NOTICES.md.
 
 `weights fetch` prints the model's license, `commercial_ok` flag, size and
 source and refuses to download without `--accept-license`, exactly as
 `datasets fetch` does; the file is verified against a recorded sha256, is
 re-verified rather than re-downloaded on a second run, and lands in
-`weights/iml_vit/` (or wherever `IMGFORENSICS_WEIGHTS_DIR` points) — both
+`weights/<name>/` (or wherever `IMGFORENSICS_WEIGHTS_DIR` points) — both
 gitignored. **Weights are never committed.** The two `weights` commands work
 without the `ml` extra installed: fetching a model and being able to run it
 are separate problems.
+
+### `iml_vit`: pixels only
 
 **Crop and pad, never resize — and never truncate.** IML-ViT is a 1024×1024
 model that reaches that size by zero-padding at the bottom-right, not by
@@ -293,6 +301,67 @@ manipulated pixels better than chance but almost never crosses 0.5 on a
 GLIDE edit, so it is a weak, badly-calibrated signal on this domain and must
 not be read as a verdict. Full tables in
 [docs/benchmarks/03_cocoglide_iml_vit.md](docs/benchmarks/03_cocoglide_iml_vit.md).
+
+### `catnet_v2`: the JPEG stream, not just the pixels
+
+CAT-Net's second stream reads the *quantized DCT coefficients* and the
+*quantization table* of the JPEG the image is stored in, so a region pasted
+in with a different compression history stands out even where the pixels
+look seamless. Two consequences follow, both of them upstream's design and
+both reproduced here:
+
+- **Non-JPEG input is re-encoded to a quality-100, 4:4:4 JPEG first** (in
+  memory), because the model has no other way to be fed. `details` records
+  `input_was_jpeg`, `jpeg_quality_estimate` (the input's own, from the
+  `metadata` signal's estimator) and `dct_source`, so a heatmap can never be
+  read without knowing which of the two paths produced it.
+- Reading those coefficients needs a JPEG entropy decoder. Upstream uses
+  `jpegio`, which publishes no Windows wheel and no wheel past CPython 3.10,
+  so this project decodes them in pure numpy/Python instead
+  (`imgforensics.localization._jpegcoef`: baseline and extended-sequential
+  Huffman JPEGs, chroma subsampling and restart intervals included;
+  progressive, arithmetic and 12-bit JPEGs are rejected by name and fall back
+  to the re-encode). It is checked against libjpeg two ways — dequantize +
+  inverse-DCT the decoded coefficients and compare to Pillow's own decoded
+  pixels (max abs error 1 grey level), and re-quantize those pixels and
+  compare back to the coefficients. **No new dependency was added.**
+
+Inference runs at full resolution up to 1024 px, padded to whole 8x8 blocks
+with 127.5 the way upstream's dataset does; anything larger is covered by
+1024 px tiles at stride 768, both multiples of 8 so a tile boundary never
+cuts a DCT block in half. The image-level score is the same top-1% rule as
+`iml_vit`, deliberately, so the two are comparable.
+
+**On CocoGlide it clearly beats `iml_vit`**: pixel F1@0.5 0.364 vs 0.059,
+best-F1 0.605 vs 0.486, AP 0.566 vs 0.423, IoU 0.288 vs 0.037, image-level
+AUC 0.666 vs 0.535 — and unlike `iml_vit` it also beats the
+predict-everything baseline at the fixed 0.5 threshold, not only on ranking.
+Read that as a lower bound rather than a like-for-like number: CocoGlide is
+PNG, so every image goes through the quality-100 re-encode and the DCT
+stream is reading a compression history this toolkit created. Cost on the
+RTX 2060: 1.0 GB peak allocated / 1.2 GB reserved at 1024 px (flat above one
+tile), 549 ms per 256 px image — of which roughly 340 ms is the Python JPEG
+decoder, not the network. Full tables in
+[docs/benchmarks/03_cocoglide_catnet.md](docs/benchmarks/03_cocoglide_catnet.md).
+
+## Fusion
+
+`imgforensics.fusion` combines several detectors' scores into one calibrated
+probability with an abstain band, using a pure-numpy L2-regularized logistic
+stacking model (no scikit-learn, no torch) fitted on saved benchmark records:
+
+```bash
+imgforensics benchmark manifest.jsonl --all-signals --out results.json --robustness none
+imgforensics fusion fit results.json --out weights/fuser.json
+imgforensics analyze image.jpg --fuser weights/fuser.json   # or set IMGFORENSICS_FUSER
+```
+
+Each detector's score is imputed as abstaining (0.5) when it did not run, so
+a fuser degrades gracefully with a subset of its detectors present; a "real
+below low / fake above high / uncertain in between" band is fitted on a
+held-out split so the fuser can say "not sure" instead of guessing.
+`imgforensics fusion info fuser.json` prints its weights, band and metrics
+(train/held-out AUC, ECE before/after calibration, abstain rate).
 
 ## Roadmap
 

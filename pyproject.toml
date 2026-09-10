@@ -62,7 +62,10 @@ demo = [
     "gradio>=4",
 ]
 ml = [
-    "torch>=2.2",
+    # 2.6 is the first release whose torch.serialization.safe_globals accepts
+    # an explicit (callable, name) pair, which the CAT-Net checkpoint reader
+    # in imgforensics.localization.catnet needs.
+    "torch>=2.6",
     "torchvision>=0.17",
     "timm>=1.0",
     "safetensors>=0.4",

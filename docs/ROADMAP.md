@@ -194,6 +194,33 @@ measured the same way from its first training run.
   0.3–0.5 s per 1024 px tile at batch 1 under fp16 autocast, independent of image size.
   Next in 4a: CAT-Net v2 (whose DCT stream may transfer differently) and a localizer ensemble;
   a classic splicing localizer alone is not a usable inpainting detector.
+- **Result of 4a's second slice (2026-09-10):** CAT-Net v2 is vendored the same way
+  (Apache-2.0 code + CC-BY-4.0 weights, `mjkwon2021/CAT-Net` @ `331b805`, the `yacs` config
+  machinery and all training code removed) and registered as `catnet_v2`, and the DCT stream it
+  needs is fed by a pure-numpy baseline-JPEG entropy decoder written for this project
+  (`_jpegcoef.py`) because `jpegio` publishes no Windows wheel and none past CPython 3.10.
+  **The DCT stream transfers, and it transfers well.** On the same 1,024 CocoGlide images
+  ([`docs/benchmarks/03_cocoglide_catnet.md`](benchmarks/03_cocoglide_catnet.md)): pixel F1@0.5
+  **0.364** (IML-ViT 0.059), best-F1 **0.605** (0.486), AP **0.566** (0.423), IoU **0.288**
+  (0.037), image-level AUC **0.666** (0.535). It beats IML-ViT on every metric measured and, unlike
+  IML-ViT, it also beats the predict-everything baseline (F1 0.355 / AP 0.252 / IoU 0.252) at the
+  fixed 0.5 threshold rather than only on ranking -- so the calibration failure the first slice
+  found is IML-ViT's, not the domain's. Per mask area its best-F1 runs 0.387 / 0.640 / 0.824
+  (small < 10% / medium / large) against IML-ViT's 0.316 / 0.457 / 0.711, and the gap is widest in
+  the medium bin. Two caveats keep this from being a verdict. First, CocoGlide's images are PNGs, so
+  every one of them is re-encoded to a quality-100 JPEG before inference exactly as upstream's own
+  demo does; the DCT stream is reading a compression history this project created, not one the
+  editor left, which is the opposite of the setting CAT-Net was trained for and makes the result a
+  lower bound rather than a like-for-like measurement. Second, the image-level AUC of 0.666 comes
+  from a heatmap statistic, not a detection head: the model fires on authentic and inpainted images
+  alike (mean top-1% score 0.83 vs 0.83 on a 12-image probe) and only the *shape* of the map
+  separates them, which is why the pixel numbers move so much further than the image-level one.
+  Cost on the 6 GB RTX 2060: 1.0 GB peak allocated (1.2 GB reserved) at 1024x1024 under fp16
+  autocast, flat above one tile; 549 ms per 256 px CocoGlide image, of which roughly 340 ms is the
+  Python JPEG decoder rather than the network. That decoder is now the bottleneck for this
+  localizer and is the first thing to profile if 4a's ensemble becomes routine.
+  Next in 4a: the localizer ensemble over `iml_vit` + `catnet_v2`, and re-running both under the
+  JPEG re-compression robustness axis, where a DCT-stream model is expected to move most.
 
 ### Phase 5 — Fusion and explanation
 
@@ -203,6 +230,14 @@ measured the same way from its first training run.
   per-signal cards with plain-language notes.
 - **Done when:** the fused score beats the best single component on the held-out test
   sets without hurting the false-positive rate, and the report renders for any input.
+- **Result of fusion 01 (2026-09-10):** a pure-numpy calibrated stacking fuser
+  (`imgforensics fusion fit`, `analyze --fuser`) fitted on the WildRF val split over the
+  experiment 02 head and the seven signals. On the WildRF test sample: AUC 0.981 vs 0.980 for
+  the head alone, false-positive rate 13.7% to 3.6% at 0.5, and outside the abstain band
+  (53% of images) balanced accuracy 0.996. `jpeg_ghost` and `copy_move` received negative
+  weights on this data, a reminder that a fuser is a dataset-specific calibration layer. See
+  [`docs/benchmarks/04_fusion_wildrf.md`](benchmarks/04_fusion_wildrf.md). Still open: the
+  explanation report with heatmap overlays and Grad-CAM, and fusion across robustness levels.
 
 ### Phase 6 — Product and release
 
