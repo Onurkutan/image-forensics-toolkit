@@ -46,13 +46,34 @@ def test_get_layout_unknown_dataset_raises_key_error() -> None:
         get_layout("does-not-exist")
 
 
-def test_cocoglide_layout_intentionally_absent() -> None:
-    # CocoGlide's acquisition recipe has a verified download URL, but its
-    # extracted zip's internal folder layout was never confirmed -- see
-    # acquire.yaml's subset_note for CocoGlide. Guessing a layout would be
-    # worse than omitting it, so it must not appear here.
-    names = {layout.dataset for layout in load_layouts()}
-    assert "CocoGlide" not in names
+def test_cocoglide_layout_attaches_masks_to_the_manipulated_half(tmp_path: Path) -> None:
+    """Only the inpainted images carry a mask; the authentic ones must not.
+
+    CocoGlide names each mask after its *authentic* partner
+    (``<coco class>_<image id>_mask.png``) while the manipulated file is named
+    ``glide_inpainting_val2017_<image id>_up.png``, so a mask_template pointed
+    at the archive's own ``mask/`` folder would attach every mask to the wrong
+    half. The packaged layout reads the ``mask_paired/`` folder instead (see
+    its ``notes``); this reproduces that shape in miniature and pins the
+    result, because getting it backwards would silently corrupt every pixel
+    metric rather than fail.
+    """
+    layout = get_layout("CocoGlide")
+    assert layout.mask_template == "mask_paired/{stem}_mask.png"
+
+    _img(tmp_path / "real" / "airplane_139871.png")
+    _img(tmp_path / "fake" / "glide_inpainting_val2017_139871_up.png")
+    _img(tmp_path / "mask" / "airplane_139871_mask.png")
+    _img(tmp_path / "mask_paired" / "glide_inpainting_val2017_139871_up_mask.png")
+
+    manifest, _, _ = prepare("CocoGlide", tmp_path, tmp_path / "out" / "manifest.jsonl")
+
+    by_label = {entry.label: entry for entry in manifest.entries}
+    assert set(by_label) == {"real", "fake"}, "both halves must be labeled"
+    assert by_label["real"].mask_path is None
+    assert by_label["fake"].mask_path == "mask_paired/glide_inpainting_val2017_139871_up_mask.png"
+    assert by_label["fake"].generator == "glide"
+    assert by_label["real"].generator is None
 
 
 # --- synthetic Synthbuster-style tree (per-generator folders) ---------------

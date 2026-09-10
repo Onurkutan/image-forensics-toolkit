@@ -113,7 +113,8 @@ IoU) metrics used to score detectors and localizers.
 ## Benchmarking
 
 `imgforensics benchmark manifest.jsonl [--detector NAME ...] [--baselines]
-[--robustness default|PATH|none] [--out results.json] [--report report.md]`
+[--robustness default|PATH|none] [--out results.json] [--report report.md]
+[--workers N]`
 runs registered detectors, plus optional trivial baselines, over a manifest
 at every level of a deterministic robustness suite (clean; JPEG/WEBP
 re-encoding; resize; a resize round-trip; center crop; Gaussian noise; a
@@ -125,7 +126,11 @@ manifest's val split when one exists; otherwise the report is marked
 "threshold tuned in-sample" as a caveat against reading it as held-out. At
 any operating threshold, a score must be strictly above it to count as a
 "fake" call, so a detector abstaining at the classical-signal midpoint of
-0.5 is not scored as calling every image fake.
+0.5 is not scored as calling every image fake. `--workers N` runs the
+classical signal detectors (and, if `--baselines` is passed, the cheap
+`constant`/`random` baselines) across `N` worker processes instead of one,
+so they no longer bottleneck a slower GPU-based detector evaluated in the
+same run; results are identical to `--workers 1` (the default), only faster.
 
 ## Learned detectors (optional `ml` extra)
 
@@ -225,6 +230,69 @@ license string, and the `commercial_ok` flag ANDed across them (`null` when
 any source is unverified, `false` when any is research-only). A head trained
 on research-only data is itself research-only, and this is the only place that
 fact survives the move from data to model.
+
+## Localization (optional `ml` extra)
+
+Where the detectors answer *how* generated an image looks, the localizers
+answer *where*. The first one (Phase 4a) is **`iml_vit`**: inference on the
+released [IML-ViT](https://github.com/SunnyHaze/IML-ViT) weights (MIT,
+arXiv:2307.14863) — a plain ViT-B/16 with windowed attention, a simple
+feature pyramid and an edge-supervised decoder head, trained on CASIA v2 —
+which returns a per-pixel probability that a pixel was manipulated. It is
+registered as a normal detector, so `analyze` and `benchmark` treat it like
+any other, but its `heatmap` is the primary output and the image-level score
+is derived from it.
+
+```bash
+imgforensics weights list                              # what is registered, and what is installed
+imgforensics weights fetch iml_vit --accept-license    # 350 MB, MIT, sha256-verified
+imgforensics analyze image.jpg --detector iml_vit --save-heatmaps out/
+```
+
+`weights fetch` prints the model's license, `commercial_ok` flag, size and
+source and refuses to download without `--accept-license`, exactly as
+`datasets fetch` does; the file is verified against a recorded sha256, is
+re-verified rather than re-downloaded on a second run, and lands in
+`weights/iml_vit/` (or wherever `IMGFORENSICS_WEIGHTS_DIR` points) — both
+gitignored. **Weights are never committed.** The two `weights` commands work
+without the `ml` extra installed: fetching a model and being able to run it
+are separate problems.
+
+**Crop and pad, never resize — and never truncate.** IML-ViT is a 1024×1024
+model that reaches that size by zero-padding at the bottom-right, not by
+scaling, so a small image keeps its native pixel statistics. Upstream's own
+transform then *crops* anything larger than 1024 px to its top-left corner,
+which throws away most of a modern photograph; this wrapper instead runs
+overlapping 1024 px tiles at stride 768 and averages the overlaps, so every
+pixel is seen at native resolution and the returned heatmap covers the whole
+image at its original shape. The number of tiles used is reported in
+`details["tiles"]`.
+
+**The image-level score.** The paper and the released code report pixel
+metrics only, so there is no upstream rule to follow: this detector reports
+the mean of the top 1% of heatmap values. A plain mean would shrink with the
+manipulated region and call every small edit authentic; a plain max is one
+noisy pixel away from calling everything fake. `details` carries `max_prob`,
+`mean_prob` and `area_fraction_above_0.5` next to it, so the score can always
+be checked against the map it came from. **With no weights installed the
+localizer abstains** — score 0.5, label `uncertain`, and a `reason` naming
+the directory it looked in and the command that fills it — rather than
+failing the run.
+
+Measured on this project's RTX 2060 (6 GB), batch 1 under fp16 autocast:
+1.6 GB peak allocated / 2.6 GB peak reserved VRAM, and 0.3–0.5 s per 1024 px
+tile (the spread is GPU contention, not image size — a 256 px thumbnail costs
+the same forward pass as a 1024 px photograph, and an n-tile image costs n of
+them).
+
+**It does not survive diffusion inpainting.** On CocoGlide — the standard
+probe for exactly that — IML-ViT scores pixel F1@0.5 0.059, best-F1 0.486,
+AP 0.423, IoU 0.037 and an image-level AUC of 0.535, against a
+predict-everything trivial baseline of F1 0.355 / AP 0.252. It ranks
+manipulated pixels better than chance but almost never crosses 0.5 on a
+GLIDE edit, so it is a weak, badly-calibrated signal on this domain and must
+not be read as a verdict. Full tables in
+[docs/benchmarks/03_cocoglide_iml_vit.md](docs/benchmarks/03_cocoglide_iml_vit.md).
 
 ## Roadmap
 

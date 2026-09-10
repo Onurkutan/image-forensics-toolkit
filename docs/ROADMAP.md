@@ -166,6 +166,27 @@ measured the same way from its first training run.
   the reference code stays unpublished: SegFormer-B2 fine-tuning.
 - **Done when:** MVSS-protocol results plus CocoGlide / AutoSplice / TGIF-test results,
   reported as F1@0.5, best-F1 and AP, with a per-mask-size breakdown.
+- **Result of 4a's first slice (2026-09-10):** the IML-ViT model definition is vendored for
+  inference (MIT, `SunnyHaze/IML-ViT` @ `07dd2be`, `fvcore`/`albumentations` and all
+  training code removed), the released 350 MB checkpoint is fetched through a license-gated
+  `imgforensics weights fetch`, and `iml_vit` is registered as a localizer that pads (never
+  resizes) to 1024 and tiles anything larger at stride 768 instead of truncating it the way
+  the upstream transform does. On all 1,024 CocoGlide images
+  ([`docs/benchmarks/03_cocoglide_iml_vit.md`](benchmarks/03_cocoglide_iml_vit.md)):
+  pixel F1@0.5 **0.059**, best-F1 **0.486**, AP **0.423**, IoU **0.037**, image-level AUC
+  **0.535**. A predict-everything baseline scores F1 0.355 / AP 0.252 / IoU 0.252 on the same
+  masks, so the model beats it on ranking (AP, best-F1) and loses to it badly at a fixed 0.5
+  threshold: it ranks inpainted pixels better than chance but almost never calls one, which is
+  a calibration failure on top of a domain-transfer failure. This is the CocoGlide gap section 2
+  predicted, measured rather than assumed, and it is why the protocol insists on reporting
+  F1@0.5, best-F1 and AP side by side — any one of the three alone tells a different story.
+  Per mask area, best-F1 runs 0.316 (small, <10%) / 0.457 (medium) / 0.711 (large); against the
+  trivial baseline's 0.104 / 0.312 / 0.684, the model adds most where the edit is smallest and
+  almost nothing where it is largest, the opposite of the usual "the small bin is where
+  everything fails". Cost on the 6 GB RTX 2060: 1.6 GB peak allocated (2.6 GB reserved) and
+  0.3–0.5 s per 1024 px tile at batch 1 under fp16 autocast, independent of image size.
+  Next in 4a: CAT-Net v2 (whose DCT stream may transfer differently) and a localizer ensemble;
+  a classic splicing localizer alone is not a usable inpainting detector.
 
 ### Phase 5 — Fusion and explanation
 

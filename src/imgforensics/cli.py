@@ -41,6 +41,11 @@ from imgforensics.detectors.features import extract_to_cache
 from imgforensics.eval.preprocess import AugmentationConfig
 from imgforensics.eval.robustness import RobustnessSuite
 from imgforensics.eval.runner import BenchmarkConfig, run_benchmark
+from imgforensics.localization import (  # also registers the iml_vit localizer
+    WEIGHTS,
+    fetch_weights,
+    weights_file,
+)
 from imgforensics.signals import SIGNAL_NAMES  # also registers all seven signal detectors
 from imgforensics.utils.image_io import image_hash
 
@@ -49,10 +54,12 @@ datasets_app = typer.Typer(help="Browse the external dataset registry.")
 manifest_app = typer.Typer(help="Build dataset manifests.")
 features_app = typer.Typer(help="Extract and cache frozen-backbone features.")
 train_app = typer.Typer(help="Train the learned detectors' heads.")
+weights_app = typer.Typer(help="Fetch pretrained model weights, after a license gate.")
 app.add_typer(datasets_app, name="datasets")
 app.add_typer(manifest_app, name="manifest")
 app.add_typer(features_app, name="features")
 app.add_typer(train_app, name="train")
+app.add_typer(weights_app, name="weights")
 console = Console()
 # A wider, fixed-width console for the dataset-registry tables: names and
 # license strings are long enough that the default (terminal-detected, often
@@ -280,6 +287,17 @@ def benchmark(
         Path | None,
         typer.Option("--report", help="Path to write the Markdown report to; stdout when omitted."),
     ] = None,
+    workers: Annotated[
+        int,
+        typer.Option(
+            "--workers",
+            help=(
+                "Run the classical signal detectors in this many worker processes "
+                "(default 1: sequential). Learned detectors and signals_mean always "
+                "run in the main process."
+            ),
+        ),
+    ] = 1,
 ) -> None:
     """Evaluate registered detectors over a manifest and report Markdown tables."""
     manifest = Manifest.load(manifest_path)
@@ -312,6 +330,7 @@ def benchmark(
         include_baselines=baselines,
         robustness=suite,
         limit=limit,
+        workers=workers,
     )
     result = run_benchmark(manifest, config, root=root, progress=False)
 
@@ -520,6 +539,67 @@ def datasets_materialize(
     table.add_row("formats", json.dumps(report.formats))
     console.print(table)
     console.print(f"Wrote {out / 'materialize.json'} and {out / 'attributes.jsonl'}")
+
+
+@weights_app.command("list")
+def weights_list() -> None:
+    """Print every registered set of pretrained weights, and whether it is installed."""
+    table = Table(title="Model weights")
+    table.add_column("name", style="bold")
+    table.add_column("model")
+    table.add_column("license")
+    table.add_column("commercial", justify="center")
+    table.add_column("size (MB)", justify="right")
+    table.add_column("installed")
+    for name, spec in sorted(WEIGHTS.items()):
+        path = weights_file(name)
+        table.add_row(
+            name,
+            spec.model or "-",
+            spec.license,
+            {True: "yes", False: "no", None: "?"}[spec.commercial_ok],
+            f"{spec.size_mb:.1f}" if spec.size_mb is not None else "-",
+            str(path) if path.is_file() else "[dim]no[/dim]",
+        )
+    _registry_console.print(table)
+
+
+@weights_app.command("fetch")
+def weights_fetch(
+    name: Annotated[str, typer.Argument(help="Weights name, as printed by 'weights list'.")],
+    dest: Annotated[
+        Path | None,
+        typer.Option(
+            "--dest",
+            help="Base directory; defaults to IMGFORENSICS_WEIGHTS_DIR, then weights/.",
+        ),
+    ] = None,
+    accept_license: Annotated[
+        bool,
+        typer.Option(
+            "--accept-license", help="Accept the printed license and proceed with the download."
+        ),
+    ] = False,
+) -> None:
+    """Download one set of pretrained weights into the weights directory."""
+    try:
+        report = fetch_weights(name, dest, accept_license=accept_license, progress=True)
+    except LicenseNotAcceptedError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    except KeyError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    table = Table(title=f"Weights: {name}")
+    table.add_column("field", style="bold")
+    table.add_column("value")
+    table.add_row("status", report.status)
+    table.add_row("path", str(report.path))
+    table.add_row("bytes", str(report.bytes_downloaded))
+    table.add_row("sha256", report.sha256 or "-")
+    console.print(table)
+    if report.status == "failed":
+        raise typer.Exit(code=1)
 
 
 def _require_ml() -> None:

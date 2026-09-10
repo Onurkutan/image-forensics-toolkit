@@ -7,12 +7,12 @@
 # `imgforensics.data.layouts.materialize_parquet` -- see its note below).
 #
 # A dataset is only listed here once its folder structure was confirmed
-# against a primary source (its README, dataset card, or an HTTP fetch of
-# its download page) -- see each entry's `notes` for what was checked and
-# when. CocoGlide is deliberately *not* listed: its acquisition recipe
-# (acquire.yaml) has a verified http URL, but the extracted zip's internal
-# folder layout is not documented anywhere reachable, so guessing globs for
-# it here would be worse than omitting it.
+# against a primary source (its README, dataset card, an HTTP fetch of its
+# download page, or -- for CocoGlide, whose zip is documented nowhere
+# reachable -- an inspection of the extracted archive itself) -- see each
+# entry's `notes` for what was checked and when. Guessing globs is never
+# an option: a dataset stays unlisted until its shape has been seen, and
+# prepare() falls back to label_from_parent_folder meanwhile.
 
 layouts:
   - dataset: "Synthbuster"
@@ -129,3 +129,43 @@ layouts:
       files to glob at all). materialize_parquet() writes
       <real|fake>/<generator>/<split>/<name>, matching
       generator_from="grandparent" / split_from="parent" here.
+
+  - dataset: "CocoGlide"
+    real_globs: ["real/**"]
+    fake_globs: ["fake/**"]
+    generator_from: "regex"
+    generator_regex: "^fake/(?P<gen>glide)_inpainting_"
+    split_from: "none"
+    mask_template: "mask_paired/{stem}_mask.png"
+    exclude_globs: ["mask/**", "mask_paired/**"]
+    notes: >-
+      Layout of the CocoGlide.zip served by grip.unina.it, inspected after
+      extraction on 2026-09-10: three sibling folders holding 512 files
+      each -- real/ (the authentic COCO val2017 256x256 crops), fake/ (the
+      GLIDE-inpainted versions) and mask/ (binary masks, white = the
+      inpainted region) -- plus table.csv, licenses.json and README.txt at
+      the root.
+
+      The archive names a mask after its *authentic* partner
+      ("<coco class>_<image id>_mask.png") while the manipulated file is
+      named "glide_inpainting_val2017_<image id>_up.png", so an image and
+      its mask share only the COCO image id, never a filename stem, and
+      the pairing lives in table.csv. A mask_template can substitute only
+      the image's own stem, so pointing it at mask/ would attach each
+      mask to the *authentic* image (whose true mask is empty) and leave
+      every manipulated image without one -- exactly backwards. This entry
+      therefore reads a mask_paired/ folder holding the same masks named
+      after the manipulated file, which one pass over table.csv creates:
+
+        python -c "import csv,shutil;from pathlib import Path;r=Path('data/raw/CocoGlide');o=r/'mask_paired';o.mkdir(exist_ok=True);[shutil.copyfile(r/w['mask'],o/(Path(w['fake']).stem+'_mask.png')) for w in csv.DictReader((r/'table.csv').open(encoding='utf-8'))]"
+
+      Run that once after `datasets fetch CocoGlide`, before `datasets
+      prepare CocoGlide`; it is idempotent and leaves the downloaded
+      folders untouched. Without it the manifest still builds, with the
+      authentic/manipulated labels intact and every mask_path null, so the
+      image-level metrics are unaffected and only the pixel metrics go
+      missing.
+
+      Authentic images carry no mask by design: their ground truth is an
+      empty mask, which mask_template correctly resolves to None rather
+      than borrowing their partner's.

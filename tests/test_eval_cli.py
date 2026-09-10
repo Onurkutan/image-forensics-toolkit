@@ -89,3 +89,27 @@ def test_cli_benchmark_requires_at_least_one_detector(tmp_path: Path) -> None:
     result = runner.invoke(app, ["benchmark", str(manifest_path)])
 
     assert result.exit_code != 0
+
+
+def test_cli_benchmark_runs_with_workers(tmp_path: Path) -> None:
+    manifest = _build_manifest(tmp_path)
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest.save(manifest_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "benchmark",
+            str(manifest_path),
+            "--robustness",
+            "none",
+            "--limit",
+            "4",
+            "--all-signals",
+            "--workers",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert "Benchmark report" in result.stdout

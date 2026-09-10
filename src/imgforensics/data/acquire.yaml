@@ -97,9 +97,10 @@ recipes:
       columns auto-converted for the `datasets` library, not gettable as
       individual files via huggingface_hub's allow_patterns). Verified via
       the TruFor repository README on 2026-09-09. The zip's internal
-      folder layout is not documented publicly, so no layouts.yaml entry
-      is provided for it yet -- inspect the extracted archive and add one
-      once the layout is confirmed.
+      folder layout is not documented publicly; it was read off an
+      extracted copy on 2026-09-10 and is now described by the CocoGlide
+      entry in layouts.yaml, whose notes also cover the one pairing step
+      needed before `datasets prepare` can resolve the masks.
     steps:
       - method: http
         url: "https://www.grip.unina.it/download/prog/TruFor/CocoGlide.zip"
