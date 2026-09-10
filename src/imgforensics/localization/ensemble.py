@@ -14,12 +14,17 @@ so its score sits in the same benchmark column as theirs.
 **The three modes**, chosen with ``mode=`` or the
 :data:`MODE_ENV` environment variable:
 
-- ``"mean"`` (the default): the pixelwise mean. Both members emit calibrated
+- ``"mean"``: the pixelwise mean. Both members emit calibrated
   probabilities, so their mean is still a probability, and a fixed 0.5
   threshold keeps meaning what it means for either member alone.
-- ``"max"``: the pixelwise maximum. Takes whichever member is more confident
-  at each pixel, which finds a region one member missed entirely at the cost
-  of inheriting the other's false positives.
+- ``"max"`` (the default): the pixelwise maximum. Takes whichever member is
+  more confident at each pixel, which finds a region one member missed
+  entirely at the cost of inheriting the other's false positives. It is the
+  default because it is the one combination that keeps the better-calibrated
+  member's behaviour at a fixed threshold: on CocoGlide the mean halves
+  CAT-Net's F1@0.5 (IML-ViT's near-zero probabilities pull every pixel down)
+  while the maximum matches it (see
+  ``docs/benchmarks/05_cocoglide_ensemble_summary.md``).
 - ``"rank_mean"``: each member's map is first replaced by its own per-image
   percentile rank, then averaged. This equalizes members whose probabilities
   live on different scales -- useful when one member is systematically
@@ -77,7 +82,7 @@ MODES: tuple[str, ...] = get_args(Mode)
 MODE_ENV = "IMGFORENSICS_LOCALIZER_ENSEMBLE_MODE"
 
 #: The mode used when neither the constructor nor the environment says.
-DEFAULT_MODE: Mode = "mean"
+DEFAULT_MODE: Mode = "max"
 
 #: Registry names of the members combined by default, in the order they run.
 DEFAULT_MEMBERS: tuple[str, ...] = ("catnet_v2", "iml_vit")

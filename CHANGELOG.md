@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `imgforensics.localization._scoring.top_fraction_score()`: the mean-of-the-top-1% image-level score rule, shared by `iml_vit`, `catnet_v2` and the ensemble so their scores stay comparable
 - `imgforensics.fusion.explain_report`: `build_report()` and `analyze --report-dir DIR`, writing `report.json`, per-detector heatmap and colour-mapped overlay PNGs (overlay downscaled to 1024 px on the longest side), and a `report.md` with plain-language cards ordered fused verdict, learned detectors, localizers, signals
 - `imgforensics.utils.jsonsafe`: shared JSON-safe conversion of detector details (numpy scalars/arrays, bytes, paths)
-- feature extraction: augmented views are computed on 16-pixel-aligned 2x crop windows instead of the whole image, and `features extract --workers N` runs decoding, window cutting and augmentation in worker processes while the backbone stays in the main process; the un-augmented view 0 is unchanged and keeps its cache keys
+- feature extraction: augmented views are computed on 16-pixel-aligned 2x crop windows instead of the whole image, and `features extract --workers N` runs decoding, window cutting and augmentation in worker processes while the backbone stays in the main process; the un-augmented view 0 is unchanged and keeps its cache keys (measured on an idle machine, `docs/benchmarks/05_feature_extraction_timing.md`: the window is 2.8x faster on 2,048 px images and about 10% slower on 512 px ones; the worker pool adds nothing on either, the main-process loop around the backbone being the remaining bottleneck)
 - Project skeleton, core types, CLI stub, CI
 - Literature surveys on AI-generated image detection, manipulation localization, and classical forensic signals (docs/research/)
 - Development roadmap (docs/ROADMAP.md)
@@ -109,6 +109,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `localizer_ensemble` defaults to `max` instead of `mean`: on CocoGlide the pixelwise mean halves CAT-Net's F1@0.5 (0.364 to 0.135) because IML-ViT's near-zero probabilities pull every pixel down, while the maximum keeps it (0.385) at the same best-F1 and AP; `mean` and `rank_mean` stay selectable
 - `imgforensics.fusion.stacking._fit_band`: a band candidate is admissible only with at least the minimum outside-band support; when none meets the target, the fallback keeps the admissible candidate with the best outside-band balanced accuracy, narrower band first (it used to prefer the widest)
 - `BaseDetector.predict` now takes `ForensicImage`
 - optional `ml` extra: `torch>=2.2` raised to `torch>=2.6`. The released CAT-Net checkpoint stores a numpy scalar next to its weights, and reading it without falling back to an arbitrary-code unpickler needs `torch.serialization.safe_globals` with an explicit `(callable, name)` pair, which 2.6 is the first release to accept

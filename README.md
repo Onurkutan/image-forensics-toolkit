@@ -346,7 +346,7 @@ metrics in [`imgforensics.eval.metrics`](src/imgforensics/eval/metrics.py)).
 | `IMGFORENSICS_WEIGHTS_DIR` | Where fetched weights and the Hub backbone cache live (default `weights/<name>/`; the DINOv2 backbone is about 350 MB, fetched on first use) |
 | `IMGFORENSICS_FUSER` | Default fuser for `analyze`, `serve` and `demo`, with `weights/fuser.json` as the last fallback |
 | `IMGFORENSICS_HEAD_ATTRIBUTION` | `0`/`false`/`no`/`off` skips the Grad-CAM map. On by default, costing one extra forward and backward pass over the crops the score already used -- 27 ms to 149 ms per image on this project's RTX 2060, no second model, nothing to download. Score, label and heatmap come from the untouched no-grad path either way, so switching it changes no number |
-| `IMGFORENSICS_LOCALIZER_ENSEMBLE_MODE` | `mean` (default), `max` or `rank_mean` for `localizer_ensemble` |
+| `IMGFORENSICS_LOCALIZER_ENSEMBLE_MODE` | `max` (default), `mean` or `rank_mean` for `localizer_ensemble` |
 
 ### Extras
 

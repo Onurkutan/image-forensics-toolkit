@@ -159,15 +159,15 @@ def test_the_default_members_are_the_two_real_localizers() -> None:
     assert LocalizerEnsemble().members == DEFAULT_MEMBERS
 
 
-def test_the_default_mode_is_mean_and_the_env_var_overrides_it(
+def test_the_default_mode_is_max_and_the_env_var_overrides_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert LocalizerEnsemble(members=_FAKE_MEMBERS).mode == "mean"
+    assert LocalizerEnsemble(members=_FAKE_MEMBERS).mode == "max"
 
     monkeypatch.setenv(MODE_ENV, "rank_mean")
     assert LocalizerEnsemble(members=_FAKE_MEMBERS).mode == "rank_mean"
     # An explicit argument still wins over the environment.
-    assert LocalizerEnsemble(members=_FAKE_MEMBERS, mode="max").mode == "max"
+    assert LocalizerEnsemble(members=_FAKE_MEMBERS, mode="mean").mode == "mean"
 
 
 def test_an_unknown_mode_is_rejected_from_either_source(
@@ -444,7 +444,8 @@ def test_cli_analyze_runs_the_ensemble_end_to_end(
     assert result.exit_code == 0, result.stdout
     entry: dict[str, Any] = json.loads(result.stdout)["results"][0]
     assert entry["detector"] == "localizer_ensemble"
-    assert entry["details"]["mode"] == "mean"
+    assert entry["details"]["mode"] == "max"
     assert entry["details"]["members"] == list(_FAKE_MEMBERS)
-    assert entry["score"] == pytest.approx(0.5, abs=1e-6)
+    # The default mode is max: the higher of the two constant member maps wins.
+    assert entry["score"] == pytest.approx(0.8, abs=1e-6)
     assert entry["heatmap"] == str(heatmap_dir / "sample_localizer_ensemble.png")

@@ -1,0 +1,14 @@
+# Dependabot version updates: one weekly pull request per ecosystem when a
+# dependency has a newer release. Security alerts are a separate repository
+# setting (Settings > Code security) and are not configured by this file.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

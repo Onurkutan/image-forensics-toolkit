@@ -121,7 +121,7 @@ def test_the_ml_tools_declare_their_parameters() -> None:
 
     assert by_name["localizer_ensemble"].kind == "localizer"
     mode = by_name["localizer_ensemble"].parameters[0]
-    assert (mode.name, mode.kind, mode.default) == ("mode", "choice", "mean")
+    assert (mode.name, mode.kind, mode.default) == ("mode", "choice", "max")
     assert set(mode.choices) == {"mean", "max", "rank_mean"}
 
 

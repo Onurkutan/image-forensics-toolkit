@@ -154,6 +154,11 @@ measured the same way from its first training run.
   model. Also found: the crop-never-resize policy breaks below the crop size (AUC 0.57 at
   quarter scale), and the classical signals are the benchmark bottleneck (about 270 ms per
   512 px image on one core) and need parallel workers.
+- **Extraction throughput (2026-09-10):** augmenting a 2x crop window instead of the whole
+  image makes extraction 2.8x faster on 2,048 px images (1.25 to 3.45 images/s) and about 10%
+  slower on 512 px ones; the `--workers` pool changes nothing on either, so the remaining
+  bottleneck is the main-process loop around the backbone, not decoding. See
+  [`docs/benchmarks/05_feature_extraction_timing.md`](benchmarks/05_feature_extraction_timing.md).
 - **Result of experiment 02 (2026-09-10):** same model, data changed (COCO and WildRF-train
   reals added, augmented-only training views, mixed-source calibration). COCO false-positive
   rate 99.9% to 2.7%, WildRF test AUC 0.459 to 0.980 (balanced accuracy 0.916 at 0.5),
@@ -169,6 +174,16 @@ measured the same way from its first training run.
   generation; the real-image distribution decides generalization, as in experiments 01 and
   02. The shipped default stays the experiment 02 head. See
   [`docs/benchmarks/06_experiment_03_summary.md`](benchmarks/06_experiment_03_summary.md).
+- **Result of the Synthbuster test (2026-09-10):** nine generator families, five of them
+  never seen in training (DALL-E 2 and 3, Firefly, GLIDE, Midjourney v5), 200 images each
+  against the 1,000 held-out COCO photographs, at every robustness level. With both classes
+  re-encoded to JPEG (`jpeg_q75`): shipped head AUC 0.969, 80.4% of fakes caught at 0.5 with
+  a 3.3% false-positive rate; the experiment 03 head 0.980 / 89.3% / 3.6%. Per family at
+  that level the shipped head catches 65-98% (DALL-E 3 easiest, Midjourney v5 and DALL-E 2
+  hardest). The clean level is inflated by Synthbuster's PNG-versus-JPEG split (0.986); the
+  JPEG rows are the ones to quote. The head trained without WildRF is the better curated-output
+  detector and the worse social-media one, two operating points on one trade-off. See
+  [`docs/benchmarks/07_synthbuster_summary.md`](benchmarks/07_synthbuster_summary.md).
 
 ### Phase 4 — Manipulation localization
 
@@ -229,6 +244,16 @@ measured the same way from its first training run.
   localizer and is the first thing to profile if 4a's ensemble becomes routine.
   Next in 4a: the localizer ensemble over `iml_vit` + `catnet_v2`, and re-running both under the
   JPEG re-compression robustness axis, where a DCT-stream model is expected to move most.
+- **Result of 4a's third slice (2026-09-10):** `localizer_ensemble` with three parameter-free
+  rules, and pixel metrics at every geometry-preserving robustness level. No combination beats
+  CAT-Net alone: `max` matches it (F1@0.5 0.385 vs 0.364, best-F1 0.608 vs 0.605), `mean`
+  keeps the ranking but loses two thirds of the F1@0.5 to IML-ViT's near-zero probabilities,
+  `rank_mean` wins the fixed threshold by construction and loses the ranking; `max` is the
+  default. Under JPEG re-compression CAT-Net's map *improves* (best-F1 0.598 clean to 0.631
+  at q85, image AUC 0.633 to 0.738) because the DCT stream finally reads a real JPEG history,
+  holds to q50, and comes apart under WEBP and sigma-5 noise; IML-ViT is flat at every level.
+  See [`docs/benchmarks/05_cocoglide_ensemble_summary.md`](benchmarks/05_cocoglide_ensemble_summary.md).
+  Phase 4a is complete; 4b (the trained inpainting localizer) is the open half.
 
 ### Phase 5 — Fusion and explanation
 
@@ -256,7 +281,17 @@ measured the same way from its first training run.
   [`docs/benchmarks/06_experiment_03_summary.md`](benchmarks/06_experiment_03_summary.md).
   `imgforensics fusion eval` now reproduces every fusion table from saved records. Shipped
   since fusion 01: the explanation report with heatmap overlays and Grad-CAM attribution.
-  Still open: fusion across robustness levels (records being collected).
+- **Result of fusion 03 (2026-09-10):** the head and the seven signals scored at all 15
+  robustness levels on WildRF val and test. The head's false-positive rate on laundered reals
+  rises from 13.7% clean to 31% at half scale and 23% under the social re-share level; either
+  fuser brings every level back to 4-10% at an unchanged AUC. A fuser fitted on clean records
+  only already generalizes across the levels (within 0.03 of the levels-fitted one's
+  false-positive rate everywhere); fitting on the levels buys a little false-positive rate for
+  a much wider abstain band (calls 20-31% of images instead of 42-56%). The shipped default
+  stays the fusion 01 fuser; quarter-scale resize remains the wall for head and signals
+  alike. See [`docs/benchmarks/05_fusion_levels_summary.md`](benchmarks/05_fusion_levels_summary.md).
+  Phase 5's exit criterion is met: the fused score beats the best single component on every
+  held-out set without hurting the false-positive rate, and the report renders for any input.
 
 ### Phase 6 — Product and release
 
