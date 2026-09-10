@@ -14,15 +14,14 @@ detector comparison. This module wires the manifest loader
 from __future__ import annotations
 
 import json
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
-from PIL import Image
 from pydantic import BaseModel
 
-import imgforensics.signals  # noqa: F401  (side effect: registers every signal detector)
 from imgforensics.core import registry
 from imgforensics.core.base import BaseDetector
 from imgforensics.core.image import ForensicImage
@@ -35,7 +34,10 @@ from imgforensics.eval.metrics import (
     best_threshold,
     roc_auc,
 )
+from imgforensics.eval.records import PixelRecord, ScoreRecord, _load_mask
 from imgforensics.eval.robustness import Perturbation, RobustnessSuite
+from imgforensics.eval.workers import WorkerTask, is_worker_eligible, run_worker_task
+from imgforensics.signals import SIGNAL_NAMES  # noqa: F401  (side effect: registers every signal)
 
 _SHUFFLE_SEED = 0
 _CLEAN_LEVEL_NAME = "clean"
@@ -58,7 +60,17 @@ class BenchmarkConfig(BaseModel):
     entries' val split when one is present, falling back to in-sample tuning
     otherwise; ``"clean"`` always tunes in-sample, even when a val split
     exists (useful for a quick iteration run where the val split itself is
-    also being scored).
+    also being scored). ``workers`` controls the classical signal detectors'
+    concurrency: at ``1`` (default) everything runs sequentially in one
+    process, exactly as before this field existed; above ``1``, every
+    detector named in :data:`imgforensics.signals.SIGNAL_NAMES` (plus the
+    ``constant_real``/``constant_fake``/``random`` baselines, if selected)
+    runs in a ``concurrent.futures.ProcessPoolExecutor`` with that many
+    worker processes, so a slow GPU-based detector evaluated in the same run
+    no longer waits on them one at a time. Every other detector -- a learned
+    detector such as ``dinov2_head``, or ``signals_mean``, which needs every
+    signal itself -- always runs in the main process; see
+    :func:`imgforensics.eval.workers.is_worker_eligible`.
     """
 
     detectors: list[str] = []
@@ -67,30 +79,7 @@ class BenchmarkConfig(BaseModel):
     limit: int | None = None
     fixed_threshold: float = 0.5
     threshold_split: Literal["val", "clean"] = "val"
-
-
-@dataclass
-class ScoreRecord:
-    """One (image, robustness level, detector) score."""
-
-    entry_path: str
-    label: str
-    source: str
-    generator: str | None
-    split: str | None
-    level: str
-    detector: str
-    score: float
-    elapsed_ms: float | None
-
-
-@dataclass
-class PixelRecord:
-    """One (image, detector) pixel-level metric bundle, computed at the clean level."""
-
-    entry_path: str
-    detector: str
-    metrics: PixelMetrics
+    workers: int = 1
 
 
 # ---------------------------------------------------------------------------
@@ -484,15 +473,45 @@ def _shuffled_entries(entries: list[ManifestEntry], limit: int | None) -> list[M
     return shuffled if limit is None else shuffled[:limit]
 
 
-def _load_mask(mask_path: Path, heatmap_shape: tuple[int, int]) -> np.ndarray:
-    with Image.open(mask_path) as mask_img:
-        mask = np.asarray(mask_img.convert("L"), dtype=np.uint8) > 127
-    if mask.shape != heatmap_shape:
-        resized = Image.fromarray(mask.astype(np.uint8) * 255).resize(
-            (heatmap_shape[1], heatmap_shape[0]), Image.Resampling.NEAREST
-        )
-        mask = np.asarray(resized) > 127
-    return mask
+def _partition_detectors(
+    detectors: list[BaseDetector],
+) -> tuple[list[BaseDetector], list[BaseDetector]]:
+    """Split ``detectors`` into (worker-eligible, main-process-only), each keeping order.
+
+    See :func:`imgforensics.eval.workers.is_worker_eligible` for the rule.
+    """
+    worker_detectors = [d for d in detectors if is_worker_eligible(d.name)]
+    main_detectors = [d for d in detectors if not is_worker_eligible(d.name)]
+    return worker_detectors, main_detectors
+
+
+def _record_pixel_metrics(
+    *,
+    entry: ManifestEntry,
+    perturbation: Perturbation,
+    instance: BaseDetector,
+    heatmap: np.ndarray | None,
+    resolved_root: Path,
+    pixel_records: list[PixelRecord],
+    missing_files: list[str],
+) -> None:
+    """Append a :class:`PixelRecord` when ``instance`` produced a heatmap at the clean level.
+
+    Shared by the sequential loop and the main-process (non-worker-detector)
+    loop below, so both handle a missing mask file identically.
+    """
+    if perturbation.kind != "clean" or entry.mask_path is None or heatmap is None:
+        return
+    mask_path = resolved_root / entry.mask_path
+    try:
+        mask = _load_mask(mask_path, heatmap.shape)
+    except OSError as exc:
+        missing_files.append(f"{entry.mask_path}: {exc}")
+        return
+    metrics = PixelMetrics.compute(mask, heatmap)
+    pixel_records.append(
+        PixelRecord(entry_path=entry.path, detector=instance.name, metrics=metrics)
+    )
 
 
 def _tune_threshold(
@@ -529,64 +548,156 @@ def run_benchmark(
     the manifest's stored mask share the same geometry without needing to
     warp the mask through the perturbation).
 
+    With ``config.workers <= 1`` (the default), every detector runs
+    sequentially in this process, in the exact order ``config.detectors`` /
+    ``baseline_detectors()`` produced -- this path is unchanged from every
+    prior release. With ``config.workers > 1`` and at least one
+    worker-eligible detector selected (see
+    :func:`imgforensics.eval.workers.is_worker_eligible`), those detectors
+    instead run in a ``concurrent.futures.ProcessPoolExecutor``, one task per
+    (entry, robustness level) pair, while every other detector keeps running
+    here exactly as before. Worker tasks complete out of order, so the
+    records they return are merged with this process's own records and then
+    sorted by ``(entry order, level order, detector order)`` -- the same
+    order the sequential path would have produced them in -- before
+    threshold tuning runs; the result's ``records``/``pixel_records`` are
+    therefore identical to the sequential path regardless of ``workers``.
+
     See :class:`BenchmarkConfig` for ``limit``/threshold-tuning behaviour.
     """
     resolved_root = Path(root) if root is not None else Path(manifest.meta.root)
     detectors = _build_detectors(config)
+    detector_order = {instance.name: index for index, instance in enumerate(detectors)}
+    worker_detectors, main_detectors = _partition_detectors(detectors)
     suite = config.robustness or RobustnessSuite(
         levels=[Perturbation(name=_CLEAN_LEVEL_NAME, kind="clean", params={})]
     )
     level_names = [level.name for level in suite.levels]
+    level_order = {level.name: index for index, level in enumerate(suite.levels)}
 
     entries = _shuffled_entries(manifest.entries, config.limit)
+    entry_order = {entry.path: index for index, entry in enumerate(entries)}
 
     records: list[ScoreRecord] = []
     pixel_records: list[PixelRecord] = []
     missing_files: list[str] = []
 
     total = len(entries)
-    for index, entry in enumerate(entries, start=1):
-        if progress and (index % 20 == 0 or index == total):
-            print(f"[benchmark] {index}/{total} entries")
+    use_pool = config.workers > 1 and bool(worker_detectors)
 
-        try:
-            forensic_image = ForensicImage.from_path(resolved_root / entry.path)
-        except OSError as exc:
-            missing_files.append(f"{entry.path}: {exc}")
-            continue
+    if not use_pool:
+        # Sequential path: every detector runs here, in one pass per entry,
+        # exactly as this function has always worked.
+        for index, entry in enumerate(entries, start=1):
+            if progress and (index % 20 == 0 or index == total):
+                print(f"[benchmark] {index}/{total} entries")
 
-        for perturbation in suite.levels:
-            perturbed = suite.apply(perturbation, forensic_image)
-            for instance in detectors:
-                result = instance.run(perturbed)
-                records.append(
-                    ScoreRecord(
-                        entry_path=entry.path,
-                        label=entry.label,
-                        source=entry.source,
-                        generator=entry.generator,
-                        split=entry.split,
-                        level=perturbation.name,
-                        detector=instance.name,
-                        score=result.score,
-                        elapsed_ms=result.elapsed_ms,
+            try:
+                forensic_image = ForensicImage.from_path(resolved_root / entry.path)
+            except OSError as exc:
+                missing_files.append(f"{entry.path}: {exc}")
+                continue
+
+            for perturbation in suite.levels:
+                perturbed = suite.apply(perturbation, forensic_image)
+                for instance in detectors:
+                    result = instance.run(perturbed)
+                    records.append(
+                        ScoreRecord(
+                            entry_path=entry.path,
+                            label=entry.label,
+                            source=entry.source,
+                            generator=entry.generator,
+                            split=entry.split,
+                            level=perturbation.name,
+                            detector=instance.name,
+                            score=result.score,
+                            elapsed_ms=result.elapsed_ms,
+                        )
                     )
+                    _record_pixel_metrics(
+                        entry=entry,
+                        perturbation=perturbation,
+                        instance=instance,
+                        heatmap=result.heatmap,
+                        resolved_root=resolved_root,
+                        pixel_records=pixel_records,
+                        missing_files=missing_files,
+                    )
+    else:
+        # Parallel path: worker_detectors run in a process pool, one task per
+        # (entry, level); main_detectors (learned detectors, signals_mean,
+        # and anything else not worker-eligible) run here as usual.
+        valid_entries: list[tuple[ManifestEntry, ForensicImage]] = []
+        for index, entry in enumerate(entries, start=1):
+            if progress and (index % 20 == 0 or index == total):
+                print(f"[benchmark] {index}/{total} entries")
+            try:
+                forensic_image = ForensicImage.from_path(resolved_root / entry.path)
+            except OSError as exc:
+                missing_files.append(f"{entry.path}: {exc}")
+                continue
+            valid_entries.append((entry, forensic_image))
+
+        worker_names = tuple(instance.name for instance in worker_detectors)
+        with ProcessPoolExecutor(max_workers=config.workers) as executor:
+            futures = [
+                executor.submit(
+                    run_worker_task,
+                    WorkerTask(
+                        root=resolved_root,
+                        entry=entry,
+                        perturbation=perturbation,
+                        detector_names=worker_names,
+                    ),
                 )
-                if (
-                    perturbation.kind == "clean"
-                    and entry.mask_path is not None
-                    and result.heatmap is not None
-                ):
-                    mask_path = resolved_root / entry.mask_path
-                    try:
-                        mask = _load_mask(mask_path, result.heatmap.shape)
-                    except OSError as exc:
-                        missing_files.append(f"{entry.mask_path}: {exc}")
-                        continue
-                    metrics = PixelMetrics.compute(mask, result.heatmap)
-                    pixel_records.append(
-                        PixelRecord(entry_path=entry.path, detector=instance.name, metrics=metrics)
+                for entry, _ in valid_entries
+                for perturbation in suite.levels
+            ]
+            for future in as_completed(futures):
+                worker_result = future.result()
+                records.extend(worker_result.records)
+                pixel_records.extend(worker_result.pixel_records)
+                missing_files.extend(worker_result.missing_files)
+
+        for entry, forensic_image in valid_entries:
+            for perturbation in suite.levels:
+                perturbed = suite.apply(perturbation, forensic_image)
+                for instance in main_detectors:
+                    result = instance.run(perturbed)
+                    records.append(
+                        ScoreRecord(
+                            entry_path=entry.path,
+                            label=entry.label,
+                            source=entry.source,
+                            generator=entry.generator,
+                            split=entry.split,
+                            level=perturbation.name,
+                            detector=instance.name,
+                            score=result.score,
+                            elapsed_ms=result.elapsed_ms,
+                        )
                     )
+                    _record_pixel_metrics(
+                        entry=entry,
+                        perturbation=perturbation,
+                        instance=instance,
+                        heatmap=result.heatmap,
+                        resolved_root=resolved_root,
+                        pixel_records=pixel_records,
+                        missing_files=missing_files,
+                    )
+
+        # Worker tasks complete out of submission order; restore the same
+        # (entry, level, detector) order the sequential path produces.
+        records.sort(
+            key=lambda r: (
+                entry_order[r.entry_path],
+                level_order[r.level],
+                detector_order[r.detector],
+            )
+        )
+        pixel_records.sort(key=lambda r: (entry_order[r.entry_path], detector_order[r.detector]))
 
     has_val_split = config.threshold_split == "val" and any(
         r.level == _CLEAN_LEVEL_NAME and r.split == "val" for r in records
