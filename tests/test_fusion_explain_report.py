@@ -20,6 +20,7 @@ from imgforensics.core.image import ForensicImage
 from imgforensics.core.types import DetectionResult
 from imgforensics.eval.runner import BenchmarkResult
 from imgforensics.fusion.explain_report import (
+    _ATTRIBUTION_CAPTION,
     OVERLAY_MAX_SIDE,
     ReportPaths,
     apply_colormap,
@@ -198,7 +199,55 @@ def test_build_report_json_keys_present_and_serialisable(tmp_path: Path) -> None
     assert by_detector["metadata"]["overlay"] is None
     assert by_detector["ela"]["heatmap"] == "ela_heatmap.png"
     assert by_detector["ela"]["overlay"]["file"] == "ela_overlay.png"
+    assert by_detector["ela"]["attribution"] is None
     assert "fusion" not in document
+
+
+def test_build_report_writes_the_attribution_pair_json_and_caption(tmp_path: Path) -> None:
+    image = ForensicImage.from_pil(natural_like_image(size=(96, 64)))
+    attribution = np.flip(_gradient_heatmap(image.width, image.height), axis=1).copy()
+    results = [_metadata_result(), _ela_result(image, attribution=attribution)]
+
+    out_dir = tmp_path / "report"
+    paths = build_report(image, results, fuser=None, out_dir=out_dir, source_name="x.jpg")
+
+    attribution_path = out_dir / "ela_attribution.png"
+    attribution_overlay_path = out_dir / "ela_attribution_overlay.png"
+    assert attribution_path.is_file()
+    assert attribution_overlay_path.is_file()
+    assert paths.attribution_paths == {"ela": attribution_path}
+
+    with Image.open(attribution_path) as attribution_img:
+        assert attribution_img.mode == "L"
+        assert attribution_img.size == (96, 64)
+
+    document = json.loads(paths.json_path.read_text(encoding="utf-8"))
+    by_detector = {entry["detector"]: entry for entry in document["detectors"]}
+    assert by_detector["ela"]["attribution"]["file"] == "ela_attribution.png"
+    assert by_detector["ela"]["attribution"]["overlay"]["file"] == "ela_attribution_overlay.png"
+    assert by_detector["ela"]["attribution"]["overlay"]["downscaled"] is False
+    assert by_detector["metadata"]["attribution"] is None
+    # The heatmap pair is untouched by the attribution pair sitting next to it.
+    assert by_detector["ela"]["heatmap"] == "ela_heatmap.png"
+
+    markdown = paths.markdown_path.read_text(encoding="utf-8")
+    assert "![ela attribution overlay](ela_attribution_overlay.png)" in markdown
+    assert _ATTRIBUTION_CAPTION in markdown
+
+
+def test_build_report_omits_the_attribution_caption_without_a_map(tmp_path: Path) -> None:
+    image = ForensicImage.from_pil(natural_like_image(size=(48, 48)))
+    paths = build_report(
+        image,
+        [_ela_result(image)],
+        fuser=None,
+        out_dir=tmp_path / "report",
+        source_name="x.jpg",
+    )
+
+    assert paths.attribution_paths == {}
+    assert not list(paths.out_dir.glob("*_attribution*.png"))
+    assert _ATTRIBUTION_CAPTION not in paths.markdown_path.read_text(encoding="utf-8")
 
 
 def test_build_report_no_fuser_omits_fusion_key_and_card(tmp_path: Path) -> None:

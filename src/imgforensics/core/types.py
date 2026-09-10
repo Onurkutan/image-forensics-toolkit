@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 Label = Literal["real", "fake", "uncertain"]
 
@@ -16,6 +16,16 @@ class DetectionResult(BaseModel):
     ``score`` is the probability that the image is generated or manipulated,
     in the range [0, 1], where 0 means confidently real and 1 means
     confidently fake (AI-generated, AI-inpainted, or classically manipulated).
+
+    The two optional maps answer different questions and are deliberately kept
+    apart. ``heatmap`` is *what the detector found*: a probability per pixel,
+    on the same scale as ``score``, so 0.8 means the same thing in every map
+    and in every image. ``attribution`` is *where the detector looked*: a
+    saliency map normalized to a maximum of 1 within its own image, which
+    ranks pixels against each other and carries no meaning across images --
+    it is not a probability, and a bright pixel marks evidence the detector
+    used, not a claim that the pixel was manipulated. Both are 2-D float
+    arrays with values in [0, 1], shaped like the image.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -24,20 +34,22 @@ class DetectionResult(BaseModel):
     score: float = Field(ge=0.0, le=1.0)
     label: Label
     heatmap: np.ndarray | None = None
+    attribution: np.ndarray | None = None
     details: dict[str, Any] = Field(default_factory=dict)
     elapsed_ms: float | None = None
 
-    @field_validator("heatmap")
+    @field_validator("heatmap", "attribution")
     @classmethod
-    def _validate_heatmap(cls, value: np.ndarray | None) -> np.ndarray | None:
+    def _validate_map(cls, value: np.ndarray | None, info: ValidationInfo) -> np.ndarray | None:
         if value is None:
             return value
+        name = info.field_name
         if value.ndim != 2:
-            raise ValueError(f"heatmap must be 2-D, got shape {value.shape}")
+            raise ValueError(f"{name} must be 2-D, got shape {value.shape}")
         if not np.issubdtype(value.dtype, np.floating):
-            raise ValueError(f"heatmap must be a float array, got dtype {value.dtype}")
+            raise ValueError(f"{name} must be a float array, got dtype {value.dtype}")
         if value.size and (value.min() < 0.0 or value.max() > 1.0):
-            raise ValueError("heatmap values must be within [0.0, 1.0]")
+            raise ValueError(f"{name} values must be within [0.0, 1.0]")
         return value
 
 

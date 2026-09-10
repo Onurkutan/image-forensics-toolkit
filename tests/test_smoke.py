@@ -200,6 +200,9 @@ def test_cli_analyze_save_heatmaps(tmp_path: Path) -> None:
     assert ela_entry["heatmap"] == str(heatmap_path)
     metadata_entry = next(entry for entry in document["results"] if entry["detector"] == "metadata")
     assert metadata_entry["heatmap"] is None
+    # The signals report no attribution map, so the key is present and null.
+    assert ela_entry["attribution"] is None
+    assert metadata_entry["attribution"] is None
 
 
 def test_cli_analyze_selects_single_detector(tmp_path: Path) -> None:

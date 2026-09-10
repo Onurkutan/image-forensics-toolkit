@@ -29,10 +29,12 @@ from imgforensics.cli import app  # noqa: E402
 from imgforensics.core import registry  # noqa: E402
 from imgforensics.core.image import ForensicImage  # noqa: E402
 from imgforensics.data.manifest import build_manifest, label_from_parent_folder  # noqa: E402
+from imgforensics.detectors import attribution as attribution_module  # noqa: E402
 from imgforensics.detectors import backbones  # noqa: E402
 from imgforensics.detectors.crops import CropPolicy  # noqa: E402
 from imgforensics.detectors.head import HeadOptions  # noqa: E402
 from imgforensics.detectors.learned import (  # noqa: E402
+    HEAD_ATTRIBUTION_ENV,
     HEAD_DIR_ENV,
     LearnedDetector,
     resolve_checkpoint_dir,
@@ -196,6 +198,79 @@ def test_random_mode_averages_overlapping_crops(checkpoint: Path, tmp_path: Path
     assert float(heatmap.max()) > 0.0
 
 
+def _fixed_maps(grid: int = 4) -> Any:
+    """A stand-in for ``grad_cam``: one all-ones map per crop, on a tiny grid.
+
+    The real Grad-CAM pass has its own tests
+    (``tests/test_detectors_attribution.py``); what these tests are about is
+    the wiring around it -- that the per-crop maps reach the result, the
+    details describe them, and a failure stays contained.
+    """
+
+    def fake(model: Any, spec: Any, head: Any, batch: Any, calibration: Any) -> np.ndarray:
+        return np.ones((int(batch.shape[0]), grid, grid), dtype=np.float32)
+
+    return fake
+
+
+def test_predict_attaches_the_attribution_map_and_describes_it(
+    checkpoint: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(attribution_module, "grad_cam", _fixed_maps())
+    detector = LearnedDetector(checkpoint_dir=checkpoint)
+    detector.load("cpu")
+
+    image = _forensic_image()
+    result = detector.predict(image)
+
+    attribution = result.attribution
+    assert attribution is not None
+    assert attribution.shape == (image.height, image.width)
+    # The same four 224 tiles the heatmap covers, and nothing outside them.
+    assert np.allclose(attribution[:448, :448], 1.0)
+    assert np.all(attribution[448:, :] == 0.0)
+
+    details = result.details["attribution"]
+    assert details["method"] == "grad-cam"
+    assert details["grid"] == 4
+    # DINOv2's spec selects blocks 8-11, each explained by the block feeding
+    # it; the pooled row shares block 10 with the last selected layer.
+    assert details["target_blocks"] == [7, 8, 9, 10]
+
+
+def test_the_attribution_env_var_switches_the_map_off(
+    checkpoint: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(HEAD_ATTRIBUTION_ENV, "0")
+    detector = LearnedDetector(checkpoint_dir=checkpoint)
+    detector.load("cpu")
+    assert detector.attribution is False
+
+    result = detector.predict(_forensic_image())
+
+    assert result.attribution is None
+    assert "attribution" not in result.details
+    assert result.heatmap is not None  # the heatmap is a separate thing
+
+
+def test_a_failing_attribution_pass_never_fails_the_prediction(
+    checkpoint: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def explode(*_args: Any, **_kwargs: Any) -> np.ndarray:
+        raise RuntimeError("no blocks to hook")
+
+    monkeypatch.setattr(attribution_module, "grad_cam", explode)
+    detector = LearnedDetector(checkpoint_dir=checkpoint)
+    detector.load("cpu")
+
+    result = detector.predict(_forensic_image())
+
+    assert result.attribution is None
+    assert 0.0 <= result.score <= 1.0
+    assert result.heatmap is not None
+    assert "no blocks to hook" in result.details["attribution"]["error"]
+
+
 def test_without_a_checkpoint_the_detector_abstains_with_a_reason(tmp_path: Path) -> None:
     missing = tmp_path / "nowhere"
     detector = LearnedDetector(checkpoint_dir=missing)
@@ -262,6 +337,11 @@ def test_cli_analyze_runs_the_learned_detector_from_the_env_var(
     assert entry["details"]["n_crops"] == 4
     assert entry["heatmap"] == str(heatmap_dir / "sample_dinov2_head.png")
     assert (heatmap_dir / "sample_dinov2_head.png").is_file()
+    # The Grad-CAM pass runs for real here, on the tiny backbone.
+    attribution_png = heatmap_dir / "sample_dinov2_head_attribution.png"
+    assert entry["attribution"] == str(attribution_png)
+    assert attribution_png.is_file()
+    assert entry["details"]["attribution"]["method"] == "grad-cam"
 
 
 def test_cli_analyze_reports_the_abstention_when_no_head_is_installed(

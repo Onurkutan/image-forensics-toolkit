@@ -4,8 +4,15 @@
 optionally, a fitted :class:`~imgforensics.fusion.stacking.Fuser`) into a
 self-contained report folder -- ``report.json`` (machine-readable), a
 ``<detector>_heatmap.png`` / ``<detector>_overlay.png`` pair per detector
-that produced a heatmap, and ``report.md`` (a human-readable summary with
-plain-language cards, reusing :data:`~imgforensics.fusion.report.DETECTOR_NOTES`).
+that produced a heatmap, the same pair suffixed ``_attribution`` for a
+detector that also produced an attribution map, and ``report.md`` (a
+human-readable summary with plain-language cards, reusing
+:data:`~imgforensics.fusion.report.DETECTOR_NOTES`).
+
+The two map kinds render the same way but are never mixed: a heatmap is a
+probability per pixel, an attribution map only ranks pixels within its own
+image (see :class:`~imgforensics.core.types.DetectionResult`), which is what
+the caption under the attribution overlay says in as many words.
 
 Pure ``numpy`` + ``Pillow`` -- no plotting library -- so :func:`apply_colormap`
 implements a small built-in 5-stop colour ramp instead of depending on
@@ -48,6 +55,14 @@ _OUTLINE_THRESHOLD = 0.5
 _MAX_OVERLAY_ALPHA = 0.6
 
 _OUTLINE_COLOR = (255.0, 255.0, 255.0)
+
+#: Caption printed under a detector card's attribution overlay. Spelled out
+#: rather than left to the reader, because a bright saliency map sitting under
+#: a bright heatmap invites exactly the wrong reading.
+_ATTRIBUTION_CAPTION = (
+    "*Where the classifier looked (Grad-CAM); brighter = more influence on the score, "
+    "not a probability.*"
+)
 
 _SCORE_BAR_WIDTH = 20
 _TOP_CONTRIBUTIONS_SHOWN = 5
@@ -246,6 +261,7 @@ class ReportPaths:
     markdown_path: Path
     heatmap_paths: dict[str, Path]
     overlay_paths: dict[str, Path]
+    attribution_paths: dict[str, Path]
 
 
 def _fusion_block(fuser: Fuser, results: Sequence[DetectionResult]) -> dict[str, Any]:
@@ -285,6 +301,9 @@ def build_report(
 
     - ``<detector>_heatmap.png`` and ``<detector>_overlay.png`` for every
       result that carries a heatmap (see :func:`blend_overlay`).
+    - ``<detector>_attribution.png`` and ``<detector>_attribution_overlay.png``
+      for every result that carries an attribution map, rendered identically
+      and captioned in ``report.md`` to keep the two kinds apart.
     - ``report.json``: image info, per-detector entries, the fusion block
       (only present when ``fuser`` is given), package version and a created
       timestamp.
@@ -308,24 +327,44 @@ def build_report(
     heatmap_paths: dict[str, Path] = {}
     overlay_paths: dict[str, Path] = {}
     overlay_meta: dict[str, dict[str, Any]] = {}
+    attribution_paths: dict[str, Path] = {}
+    attribution_overlay_paths: dict[str, Path] = {}
+    attribution_blocks: dict[str, dict[str, Any]] = {}
 
     for result in results:
-        if result.heatmap is None:
-            continue
+        if result.heatmap is not None:
+            heatmap_path = out_dir / f"{result.detector}_heatmap.png"
+            _save_heatmap_png(result.heatmap, heatmap_path)
+            heatmap_paths[result.detector] = heatmap_path
 
-        heatmap_path = out_dir / f"{result.detector}_heatmap.png"
-        _save_heatmap_png(result.heatmap, heatmap_path)
-        heatmap_paths[result.detector] = heatmap_path
+            overlay_image, downscaled = _build_overlay_image(image.rgb, result.heatmap)
+            overlay_path = out_dir / f"{result.detector}_overlay.png"
+            overlay_image.save(overlay_path)
+            overlay_paths[result.detector] = overlay_path
+            overlay_meta[result.detector] = {
+                "width": overlay_image.width,
+                "height": overlay_image.height,
+                "downscaled": downscaled,
+            }
 
-        overlay_image, downscaled = _build_overlay_image(image.rgb, result.heatmap)
-        overlay_path = out_dir / f"{result.detector}_overlay.png"
-        overlay_image.save(overlay_path)
-        overlay_paths[result.detector] = overlay_path
-        overlay_meta[result.detector] = {
-            "width": overlay_image.width,
-            "height": overlay_image.height,
-            "downscaled": downscaled,
-        }
+        if result.attribution is not None:
+            attribution_path = out_dir / f"{result.detector}_attribution.png"
+            _save_heatmap_png(result.attribution, attribution_path)
+            attribution_paths[result.detector] = attribution_path
+
+            overlay_image, downscaled = _build_overlay_image(image.rgb, result.attribution)
+            overlay_path = out_dir / f"{result.detector}_attribution_overlay.png"
+            overlay_image.save(overlay_path)
+            attribution_overlay_paths[result.detector] = overlay_path
+            attribution_blocks[result.detector] = {
+                "file": attribution_path.name,
+                "overlay": {
+                    "file": overlay_path.name,
+                    "width": overlay_image.width,
+                    "height": overlay_image.height,
+                    "downscaled": downscaled,
+                },
+            }
 
     fusion_block = _fusion_block(fuser, results) if fuser is not None else None
 
@@ -354,6 +393,7 @@ def build_report(
                     if result.detector in overlay_paths
                     else None
                 ),
+                "attribution": attribution_blocks.get(result.detector),
             }
             for result in results
         ],
@@ -375,6 +415,7 @@ def build_report(
             band=fuser.band if fuser is not None else None,
             fusion_block=fusion_block,
             overlay_paths=overlay_paths,
+            attribution_overlay_paths=attribution_overlay_paths,
             source_name=source_name,
             digest=digest,
         ),
@@ -387,6 +428,7 @@ def build_report(
         markdown_path=markdown_path,
         heatmap_paths=heatmap_paths,
         overlay_paths=overlay_paths,
+        attribution_paths=attribution_paths,
     )
 
 
@@ -517,7 +559,11 @@ def _ordered_results(results: Sequence[DetectionResult]) -> list[DetectionResult
     return sorted(results, key=lambda result: (_group_rank(result.detector), -result.score))
 
 
-def _detector_card(result: DetectionResult, overlay_paths: Mapping[str, Path]) -> list[str]:
+def _detector_card(
+    result: DetectionResult,
+    overlay_paths: Mapping[str, Path],
+    attribution_overlay_paths: Mapping[str, Path],
+) -> list[str]:
     lines = [
         f"## {result.detector}",
         "",
@@ -533,6 +579,13 @@ def _detector_card(result: DetectionResult, overlay_paths: Mapping[str, Path]) -
 
     if result.detector in overlay_paths:
         lines.append(f"![{result.detector} overlay]({overlay_paths[result.detector].name})")
+        lines.append("")
+
+    if result.detector in attribution_overlay_paths:
+        attribution_name = attribution_overlay_paths[result.detector].name
+        lines.append(f"![{result.detector} attribution overlay]({attribution_name})")
+        lines.append("")
+        lines.append(_ATTRIBUTION_CAPTION)
         lines.append("")
 
     note = DETECTOR_NOTES.get(result.detector, GENERIC_NOTE)
@@ -554,6 +607,7 @@ def _render_markdown(
     band: Band | None,
     fusion_block: Mapping[str, Any] | None,
     overlay_paths: Mapping[str, Path],
+    attribution_overlay_paths: Mapping[str, Path],
     source_name: str,
     digest: str,
 ) -> str:
@@ -574,6 +628,6 @@ def _render_markdown(
         lines += _fusion_card(fusion_block, band)
 
     for result in _ordered_results(results):
-        lines += _detector_card(result, overlay_paths)
+        lines += _detector_card(result, overlay_paths, attribution_overlay_paths)
 
     return "\n".join(lines) + "\n"

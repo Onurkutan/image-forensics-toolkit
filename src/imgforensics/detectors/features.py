@@ -522,6 +522,20 @@ class FeatureExtractor:
             image, view, self.crop_policy, self.augment, self.window_augment
         )
 
+    def batch_for_image(self, image: ForensicImage, view: int = 0) -> np.ndarray:
+        """The normalized ``(n_crops, 3, H, W)`` batch this image's crops feed the backbone.
+
+        The same crops and the same normalization :meth:`features_for_image`
+        uses, stopping one step earlier -- before the forward pass and before
+        the ``batch_size`` chunking, since the caller wants the pixels rather
+        than the features. Exposed for
+        :func:`imgforensics.detectors.attribution.grad_cam`, which has to run
+        its own gradient-carrying forward pass over exactly the crops the
+        score was computed from.
+        """
+        mean, std = self.normalization
+        return to_array(self._crops_for_view(image, view), mean, std)
+
     def features_for_image(self, image: ForensicImage, view: int = 0) -> np.ndarray:
         """Features for one image: ``(n_crops, n_layers, D)`` float32.
 

@@ -17,6 +17,19 @@ how to train one. A missing optional model must not break ``analyze`` for the
 signals that *are* available -- the same reasoning as the ``c2pa`` signal
 without its optional library.
 
+**Two maps, two passes.** Alongside the crop-probability heatmap, the detector
+produces a Grad-CAM attribution map
+(:mod:`imgforensics.detectors.attribution`) saying where *inside* those crops
+the head looked; ``IMGFORENSICS_HEAD_ATTRIBUTION`` turns it off. It is a
+second forward pass rather than a gradient-carrying version of the first one
+on purpose: the scoring path -- and the cached-feature path that shares its
+code with the training sweep -- has to keep producing exactly the numbers that
+were benchmarked, and folding ``enable_grad`` into it would change what the
+backbone runs under for every caller, including the ones that never ask for an
+explanation. The score therefore still comes from the untouched no-grad path,
+and a failure in the attribution pass is caught and reported in the details
+rather than allowed to fail the prediction.
+
 This module deliberately imports no ``torch`` at module scope, even though it
 only ever runs with the ``ml`` extra installed:
 :mod:`imgforensics.detectors` imports it for its registration side effect, and
@@ -37,7 +50,7 @@ from imgforensics.core.base import BaseDetector
 from imgforensics.core.image import ForensicImage
 from imgforensics.core.registry import register
 from imgforensics.core.types import DetectionResult, label_from_score
-from imgforensics.detectors.crops import crop_boxes
+from imgforensics.detectors.crops import CropBox, crop_boxes
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing only, never at runtime
     from imgforensics.detectors.features import FeatureExtractor
@@ -46,11 +59,20 @@ if TYPE_CHECKING:  # pragma: no cover - import-time typing only, never at runtim
 #: Environment variable naming the directory a trained head is loaded from.
 HEAD_DIR_ENV = "IMGFORENSICS_HEAD_DIR"
 
+#: Environment variable switching the Grad-CAM attribution map off.
+HEAD_ATTRIBUTION_ENV = "IMGFORENSICS_HEAD_ATTRIBUTION"
+
 #: Fallback checkpoint directory, relative to the working directory.
 DEFAULT_HEAD_DIR = Path("weights/dinov2_head")
 
 _TRAIN_HINT = "imgforensics train head --config configs/head_dinov2.yaml"
 _ABSTAIN_SCORE = 0.5
+
+#: Values of :data:`HEAD_ATTRIBUTION_ENV` that switch attribution off.
+_ATTRIBUTION_OFF = frozenset({"0", "false", "no", "off"})
+
+#: Longest attribution failure message kept in the details.
+_ERROR_LIMIT = 200
 
 
 def resolve_checkpoint_dir(checkpoint_dir: str | Path | None = None) -> Path:
@@ -63,6 +85,24 @@ def resolve_checkpoint_dir(checkpoint_dir: str | Path | None = None) -> Path:
     return DEFAULT_HEAD_DIR
 
 
+def resolve_attribution(attribution: bool | None = None) -> bool:
+    """Whether to compute the attribution map: argument, then env var, then on.
+
+    ``IMGFORENSICS_HEAD_ATTRIBUTION`` is read case-insensitively and only
+    ``0``, ``false``, ``no`` and ``off`` switch the map off; unset, ``1``,
+    ``true``, ``yes``, ``on`` -- and anything unrecognised -- leave it on. The
+    default is on because the explanation is the point of the report and the
+    extra cost is one backward pass over a handful of 224 px crops, not
+    another model.
+    """
+    if attribution is not None:
+        return bool(attribution)
+    from_env = os.environ.get(HEAD_ATTRIBUTION_ENV)
+    if from_env is None:
+        return True
+    return from_env.strip().lower() not in _ATTRIBUTION_OFF
+
+
 @register("dinov2_head")
 class LearnedDetector(BaseDetector):
     """Scores an image with a trained :class:`~imgforensics.detectors.head.MultiLayerHead`.
@@ -73,7 +113,9 @@ class LearnedDetector(BaseDetector):
     logits, and average the crop probabilities into the image score. The
     per-crop probabilities are also painted back onto a heatmap of the
     image's own shape, so a large image says *where* it looks generated and
-    not only *how much*.
+    not only *how much*, and a second pass paints a Grad-CAM attribution map
+    saying where inside those crops the head looked (see the module
+    docstring).
 
     The backbone is loaded once per instance and reused across
     :meth:`predict` calls (it is the expensive part), which is why the
@@ -82,7 +124,11 @@ class LearnedDetector(BaseDetector):
 
     name = "dinov2_head"
 
-    def __init__(self, checkpoint_dir: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        checkpoint_dir: str | Path | None = None,
+        attribution: bool | None = None,
+    ) -> None:
         """Point the detector at a checkpoint directory (nothing is read yet).
 
         Args:
@@ -92,9 +138,15 @@ class LearnedDetector(BaseDetector):
                 the fallback is resolved at :meth:`load` time, so setting the
                 environment variable after constructing the detector still
                 works.
+            attribution: Whether to compute the Grad-CAM attribution map.
+                ``None`` (the default) reads :data:`HEAD_ATTRIBUTION_ENV` at
+                :meth:`load` time, on the same "set it after constructing"
+                reasoning as ``checkpoint_dir``.
         """
         self._configured_dir = checkpoint_dir
+        self._configured_attribution = attribution
         self.checkpoint_dir = resolve_checkpoint_dir(checkpoint_dir)
+        self.attribution = resolve_attribution(attribution)
         self.device = "cpu"
         self.meta: CheckpointMeta | None = None
         self._head: MultiLayerHead | None = None
@@ -119,6 +171,7 @@ class LearnedDetector(BaseDetector):
         """
         self._attempted = True
         self.checkpoint_dir = resolve_checkpoint_dir(self._configured_dir)
+        self.attribution = resolve_attribution(self._configured_attribution)
         metadata_path = self.checkpoint_dir / "head.json"
         weights_path = self.checkpoint_dir / "head.safetensors"
 
@@ -166,6 +219,15 @@ class LearnedDetector(BaseDetector):
             details={"reason": reason},
         )
 
+    def _boxes_for(self, image: ForensicImage, meta: CheckpointMeta) -> list[CropBox]:
+        """Where this image's crops were cut from, seeded the way the crops were.
+
+        Shared by the heatmap and the attribution map so the two can never
+        paint their per-crop values over different rectangles.
+        """
+        material = image.raw if image.raw is not None else np.asarray(image.rgb).tobytes()
+        return crop_boxes(image.rgb, meta.crop, seed_material=material)
+
     def _heatmap(
         self, image: ForensicImage, meta: CheckpointMeta, per_crop: np.ndarray
     ) -> np.ndarray | None:
@@ -177,8 +239,7 @@ class LearnedDetector(BaseDetector):
         reflection padding of an undersized image covers nothing and is
         skipped, so a tiny image can legitimately produce an all-zero map.
         """
-        material = image.raw if image.raw is not None else np.asarray(image.rgb).tobytes()
-        boxes = crop_boxes(image.rgb, meta.crop, seed_material=material)
+        boxes = self._boxes_for(image, meta)
         if len(boxes) != len(per_crop):  # pragma: no cover - the two share one crop policy
             return None
 
@@ -196,6 +257,49 @@ class LearnedDetector(BaseDetector):
         heatmap = np.zeros_like(totals)
         heatmap[covered] = totals[covered] / counts[covered]
         return np.clip(heatmap, 0.0, 1.0).astype(np.float32)
+
+    def _attribution(
+        self, image: ForensicImage, meta: CheckpointMeta, head: MultiLayerHead
+    ) -> tuple[np.ndarray | None, dict[str, Any]]:
+        """The Grad-CAM map for this image, plus the ``details`` entry describing it.
+
+        Everything here is best-effort: a backbone without the block list
+        Grad-CAM hooks, a crop grid that is not square, or anything else the
+        gradient pass trips over yields ``(None, {"error": ...})`` and leaves
+        the score, the label and the heatmap exactly as they were.
+        """
+        try:
+            import torch
+
+            from imgforensics.detectors.attribution import (
+                grad_cam,
+                stitch_attribution,
+                target_blocks,
+            )
+
+            extractor = self._extractor_for(meta)
+            batch = torch.from_numpy(extractor.batch_for_image(image))
+            per_crop_maps = grad_cam(extractor.model, extractor.spec, head, batch, meta.calibration)
+            stitched = stitch_attribution(
+                (image.height, image.width),
+                self._boxes_for(image, meta),
+                per_crop_maps,
+                meta.crop.size,
+            )
+            weights = [float(value) for value in head.layer_weights().detach().cpu()]
+            blocks = target_blocks(
+                extractor.spec.layers, len(getattr(extractor.model, "blocks", ())), weights
+            )
+            details = {
+                "method": "grad-cam",
+                "target_blocks": sorted(blocks),
+                "grid": int(per_crop_maps.shape[-1]),
+            }
+            return stitched, details
+        except Exception as exc:
+            # Broad on purpose: an explanation is never worth a failed run.
+            message = f"{type(exc).__name__}: {exc}"
+            return None, {"error": message[:_ERROR_LIMIT]}
 
     def predict(self, image: ForensicImage) -> DetectionResult:
         """Score one image, or abstain when no trained head is available."""
@@ -233,10 +337,16 @@ class LearnedDetector(BaseDetector):
             "temperature": round(calibration.temperature, 4),
             "bias": round(calibration.bias, 4),
         }
+
+        attribution: np.ndarray | None = None
+        if self.attribution:
+            attribution, details["attribution"] = self._attribution(image, meta, head)
+
         return DetectionResult(
             detector=self.name,
             score=score,
             label=label_from_score(score),
             heatmap=self._heatmap(image, meta, per_crop),
+            attribution=attribution,
             details=details,
         )

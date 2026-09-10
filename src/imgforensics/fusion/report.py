@@ -24,7 +24,10 @@ DETECTOR_NOTES: dict[str, str] = {
     "copy_move": "duplicated (copy-moved) region detection",
     "jpeg_ghost": "JPEG recompression-quality mismatch (splice indicator)",
     "double_jpeg": "double-JPEG compression / blocking-grid offset",
-    "dinov2_head": "frozen DINOv2 features scored by a trained AI-generation head",
+    "dinov2_head": (
+        "frozen DINOv2 features scored by a trained AI-generation head; its heatmap is each "
+        "crop's probability, its attribution map is where inside those crops the head looked"
+    ),
     "iml_vit": "IML-ViT pixel-level manipulation localization, reduced to an image score",
     "catnet_v2": "CAT-Net v2 compression-aware localization, reduced to an image score",
 }

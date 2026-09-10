@@ -158,9 +158,17 @@ def _truncate(text: str, limit: int = _DETAIL_STRING_LIMIT) -> str:
     return text
 
 
-def _save_heatmap(heatmap: np.ndarray, out_dir: Path, stem: str, detector_name: str) -> Path:
+def _save_heatmap(
+    heatmap: np.ndarray, out_dir: Path, stem: str, detector_name: str, suffix: str = ""
+) -> Path:
+    """Write one float map as an 8-bit grayscale PNG, named after the image and detector.
+
+    ``suffix`` distinguishes a detector's second map -- ``"_attribution"``
+    for the Grad-CAM saliency map that some detectors report next to their
+    heatmap -- so both land in the same directory without colliding.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{stem}_{detector_name}.png"
+    out_path = out_dir / f"{stem}_{detector_name}{suffix}.png"
     array_8bit = np.clip(heatmap * 255.0, 0, 255).astype(np.uint8)
     Image.fromarray(array_8bit, mode="L").save(out_path)
     return out_path
@@ -198,7 +206,10 @@ def analyze(
         Path | None,
         typer.Option(
             "--save-heatmaps",
-            help="Directory to write each detector's heatmap as an 8-bit grayscale PNG to.",
+            help=(
+                "Directory to write each detector's heatmap -- and its attribution map, "
+                "where it has one -- as an 8-bit grayscale PNG to."
+            ),
         ),
     ] = None,
     detector: Annotated[
@@ -241,6 +252,7 @@ def analyze(
 
     results: list[DetectionResult] = []
     heatmap_paths: dict[str, Path | None] = {}
+    attribution_paths: dict[str, Path | None] = {}
     for name in names:
         detector_cls = registry.get(name)
         instance = detector_cls()
@@ -249,9 +261,16 @@ def analyze(
         results.append(result)
 
         saved_path: Path | None = None
-        if save_heatmaps is not None and result.heatmap is not None:
-            saved_path = _save_heatmap(result.heatmap, save_heatmaps, path.stem, name)
+        saved_attribution: Path | None = None
+        if save_heatmaps is not None:
+            if result.heatmap is not None:
+                saved_path = _save_heatmap(result.heatmap, save_heatmaps, path.stem, name)
+            if result.attribution is not None:
+                saved_attribution = _save_heatmap(
+                    result.attribution, save_heatmaps, path.stem, name, "_attribution"
+                )
         heatmap_paths[name] = saved_path
+        attribution_paths[name] = saved_attribution
 
     fusion_payload = _fusion_payload(loaded_fuser, results) if loaded_fuser is not None else None
 
@@ -280,6 +299,11 @@ def analyze(
                     "heatmap": (
                         str(heatmap_paths[result.detector])
                         if heatmap_paths[result.detector] is not None
+                        else None
+                    ),
+                    "attribution": (
+                        str(attribution_paths[result.detector])
+                        if attribution_paths[result.detector] is not None
                         else None
                     ),
                 }
@@ -317,6 +341,9 @@ def analyze(
         heatmap_path = heatmap_paths[result.detector]
         if heatmap_path is not None:
             details_table.add_row("heatmap", str(heatmap_path))
+        attribution_path = attribution_paths[result.detector]
+        if attribution_path is not None:
+            details_table.add_row("attribution", str(attribution_path))
         elapsed = f"{result.elapsed_ms:.1f}" if result.elapsed_ms is not None else "-"
         details_table.add_row("elapsed_ms", elapsed)
 

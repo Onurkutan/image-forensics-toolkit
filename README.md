@@ -236,6 +236,43 @@ any source is unverified, `false` when any is research-only). A head trained
 on research-only data is itself research-only, and this is the only place that
 fact survives the move from data to model.
 
+### Attribution: where the head looked
+
+The heatmap says *how generated* each crop looks; the attribution map answers
+the other half of the question — *where inside those crops* the classifier
+found its evidence. It is Grad-CAM on the backbone's own patch grid (16x16 for
+DINOv2 ViT-B/14 at 224 px), with two adaptations to this architecture: the
+gradient is taken of the **calibrated** logit, so the picture explains the
+number the report prints rather than an intermediate one, and because the head
+reads several transformer blocks there is one map per depth, combined with the
+head's own learned layer-importance weights.
+
+`analyze` writes it next to the heatmap: `<stem>_<detector>_attribution.png`
+under `--save-heatmaps`, an `attribution` entry in `--json`, and a
+`<detector>_attribution.png` / `<detector>_attribution_overlay.png` pair plus a
+captioned figure under the heatmap overlay in `--report-dir`'s `report.md`.
+
+```bash
+IMGFORENSICS_HEAD_ATTRIBUTION=0 imgforensics analyze image.jpg --report-dir out/
+```
+
+It is on by default and costs one extra forward and backward pass over the
+handful of 224 px crops the score already used — no second model, nothing to
+download. Measured on this project's RTX 2060 with the backbone already
+loaded: 27 ms to 91 ms per image for a one-crop 256 px image, 59 ms to
+149 ms for a four-crop 720x960 photograph. `IMGFORENSICS_HEAD_ATTRIBUTION=0`
+(or `false`/`no`/`off`) skips it.
+The score, the label and the heatmap come from the untouched no-grad path
+either way, so switching attribution on or off changes no number.
+
+**A saliency map is not a manipulation mask.** It is normalized to a maximum
+of 1 within its own image, so its values rank pixels against each other and
+mean nothing across images — a bright pixel marks evidence the classifier used
+for its *score*, not a claim that the pixel was edited. `dinov2_head` is a
+whole-image classifier, so on a fully generated image that evidence can sit
+anywhere, empty sky included. For "which pixels were manipulated", the
+localizers below are the right tool.
+
 ## Localization (optional `ml` extra)
 
 Where the detectors answer *how* generated an image looks, the localizers
