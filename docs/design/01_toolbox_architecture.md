@@ -91,8 +91,15 @@ the API's JSON share one serializer (`utils.jsonsafe`), so the two never drift.
 A single-page web application: one canvas component that renders the original and up to
 N tool views side by side (or as toggled layers) under **one shared transform**, a tool
 tree on the left, parameter sliders that re-run a tool with a debounce, score cards with
-the abstain band drawn on them, and a report download. Plain TypeScript with a small
-framework (Svelte or Preact) is enough; no chart library is needed beyond `<canvas>`.
+the abstain band drawn on them, and a report download. No chart library is needed beyond
+`<canvas>`.
+
+Decision (2026-09-10, milestone 6d): **no build toolchain.** The client is plain HTML, CSS
+and ES-module JavaScript packaged inside `imgforensics.api` and served by the API at `/`,
+so `imgforensics serve` gives the whole workbench from one process and one URL, works
+offline, and adds no Node dependency to a Python project. A framework (Svelte, Preact)
+would buy little for one screen and cost a second toolchain; the option stays open if the
+client outgrows a few files.
 
 ## 4. Why not just Gradio
 
