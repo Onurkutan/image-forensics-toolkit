@@ -277,6 +277,20 @@ catalogue and the client decision (web, taken 2026-09-10) are in
 - 6e. CPU inference: ONNX export of the head, a faster JPEG coefficient decoder.
 - Documentation site or extended README with benchmark report and limitations section.
 - v1.0 tag.
+- **Result of 6a-6d (2026-09-10):** shipped in one day on top of the headless library.
+  6a: `ParameterSpec`/`parameters()` and a `kind` on every tool, the `view` kind with
+  `luminance_gradient`, `noise_residual` and `bit_planes`, and `imgforensics.service`
+  (`catalogue()`, `AnalysisSession` with a parameter-keyed result cache and map pyramids,
+  `SessionStore` with a TTL and an LRU cap). 6b: `imgforensics.api` (`api` extra) with the
+  eight routes of the design note and `imgforensics serve`. 6c: `imgforensics.demo`
+  (`demo` extra), `imgforensics demo` and the `spaces/` entry point for a Hugging Face
+  Space; the Space itself and the head's model card are not published yet (they need the
+  owner's Hub credentials). 6d: the workbench client, plain HTML/CSS/ES modules served by
+  the API at `/` with no build step -- synced pan/zoom across map panels, tiles from the
+  pyramid level matching the zoom, parameter controls from the specs, the fused verdict
+  with its band, and the report download -- checked in a browser against the real
+  models. Test count 551 to 836. The Gradio demo stays the public link until the
+  workbench is deployed behind a proxy; 6e (CPU inference) is the next milestone.
 
 ## 6. Compute and disk plan
 
