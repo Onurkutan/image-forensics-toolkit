@@ -184,6 +184,18 @@ measured the same way from its first training run.
   JPEG rows are the ones to quote. The head trained without WildRF is the better curated-output
   detector and the worse social-media one, two operating points on one trade-off. See
   [`docs/benchmarks/07_synthbuster_summary.md`](benchmarks/07_synthbuster_summary.md).
+- **Result of the ITW-SM test (2026-09-15):** 10,000 never-seen in-the-wild images from four
+  platforms. Shipped head AUC 0.888 (93.6% of generated images caught, 44.2% of real
+  photographs called fake at 0.5; balanced accuracy 0.808 at the tuned threshold); the head
+  without WildRF 0.819, so social-media reals in training transfer to a second platform mix.
+  LinkedIn is the hard platform (0.80). Recompression leaves the AUC at 0.89-0.90 because the
+  images arrive already laundered. The fusion 01 fuser applied cold halves the false-positive
+  rate (0.457 to 0.214) and its band calls 27% of images at balanced accuracy 0.931. Found:
+  Instagram writes a Photoshop APP13 segment into every image and the `metadata` signal reads
+  it as an editor marker on real and generated images alike. See
+  [`docs/benchmarks/08_itwsm_summary.md`](benchmarks/08_itwsm_summary.md). With Synthbuster and
+  ITW-SM measured, Phase 3's cross-dataset exit criterion is met; the per-year decay chart
+  remains open.
 
 ### Phase 4 — Manipulation localization
 

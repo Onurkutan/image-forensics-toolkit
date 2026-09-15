@@ -91,16 +91,23 @@ layouts:
   - dataset: "ITW-SM"
     real_globs: ["0_real/**"]
     fake_globs: ["1_fake/**"]
-    generator_from: "none"
+    generator_from: "regex"
+    generator_regex: "^1_fake/(?P<gen>[a-z]+)_"
     split_from: "none"
     mask_template: null
     exclude_globs: []
     notes: >-
-      Folder names and the metadata.csv sidecar (path, label, target,
-      platform) verified against the Hugging Face dataset card on
-      2026-09-09. The originating platform (Facebook/Instagram/LinkedIn/X)
-      is only in metadata.csv, not encoded in the folder structure, so it
-      is not modeled here as a generator.
+      Verified against the gated Hugging Face repository on 2026-09-15:
+      10,004 files, 0_real/ and 1_fake/, 5,000 images per class. The
+      originating platform is the file-name prefix (facebook_10.jpg for a
+      fake, Facebook_real_10.jpg for a real), so a fake's platform is read
+      with a regex into the generator field -- the useful per-group
+      breakdown for an in-the-wild set whose generators are unlisted.
+      Real images never carry a generator (prepare() nulls it by design, to
+      keep generator-disjoint splits meaningful), so a per-platform
+      comparison of both classes is computed from the file names in the
+      benchmark summary rather than from the manifest. metadata.csv (path,
+      label, target, platform) carries the same information.
 
   - dataset: "WildRF"
     real_globs: ["**/0_real/**"]

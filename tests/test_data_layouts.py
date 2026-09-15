@@ -545,3 +545,26 @@ def test_prepare_after_materialize_uses_attributes_jsonl_for_generator_and_split
     assert by_name["fake1"].split == "val"
     assert by_name["real0"].label == "real"
     assert isinstance(report, AuditReport)
+
+
+# --- synthetic ITW-SM-style tree (platform in the fake file names) --------------
+
+
+def _make_itwsm_like_tree(root: Path) -> None:
+    for platform in ("facebook", "instagram"):
+        for i in range(2):
+            _img(root / "0_real" / f"{platform.capitalize()}_real_{i}.jpg")
+            _img(root / "1_fake" / f"{platform}_{i}.jpg")
+
+
+def test_layout_adapter_reads_itwsm_platform_from_fake_file_names(tmp_path: Path) -> None:
+    _make_itwsm_like_tree(tmp_path)
+    manifest, skipped, _report = prepare("ITW-SM", tmp_path, tmp_path / "out" / "manifest.jsonl")
+
+    assert skipped == []
+    assert len(manifest.entries) == 8
+    fakes = [entry for entry in manifest.entries if entry.label == "fake"]
+    reals = [entry for entry in manifest.entries if entry.label == "real"]
+    assert {entry.generator for entry in fakes} == {"facebook", "instagram"}
+    # Reals never carry a generator, whatever their file name says.
+    assert {entry.generator for entry in reals} == {None}
