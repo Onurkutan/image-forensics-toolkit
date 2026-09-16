@@ -85,6 +85,7 @@ _DETAIL_KEYS_BY_DETECTOR: dict[str, tuple[str, ...]] = {
     "metadata": (
         "ai_markers",
         "editor_markers",
+        "platform_markers",
         "camera_make",
         "camera_model",
         "software",

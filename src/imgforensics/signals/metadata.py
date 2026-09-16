@@ -1,7 +1,8 @@
-"""Metadata signal: EXIF/XMP parsing, editor and AI-generator markers (matched via
-guarded regex patterns so ordinary words like "influx" or "Dallas" cannot trigger
-a false positive), thumbnail consistency, and JPEG quantization-table quality
-estimation.
+"""Metadata signal: EXIF/XMP parsing, Photoshop APP13 image-resource and IPTC-IIM
+parsing (which tells a genuine editor save apart from a Facebook/Instagram
+re-encode), editor and AI-generator markers (matched via guarded regex patterns
+so ordinary words like "influx" or "Dallas" cannot trigger a false positive),
+thumbnail consistency, and JPEG quantization-table quality estimation.
 
 Only :mod:`PIL` and the MIT-licensed :mod:`piexif` (used solely to decode the
 embedded EXIF thumbnail) are required.
@@ -105,6 +106,42 @@ _TAG_EXIF_IFD = 0x8769
 _TAG_DATETIME_ORIGINAL = 0x9003
 _TAG_LENS_MODEL = 0xA434
 
+# Photoshop APP13 image-resource id of the IPTC-NAA record. It is the one block
+# platforms write on their own (Facebook/Instagram fingerprints, news-agency
+# captions); a real editor save adds further blocks beside it (1005 resolution
+# info, 1036 thumbnail, 1061 caption digest, ...).
+_IRB_IPTC_NAA = 1028
+
+# How many non-1028 resource ids the editor marker lists before eliding.
+_IRB_LIST_LIMIT = 8
+
+# IPTC-IIM datasets (record, dataset) decoded out of the 1028 block, mapped to
+# the stable key each one is reported under in ``details["iptc"]``.
+_IPTC_FIELDS: dict[tuple[int, int], str] = {
+    (2, 40): "special_instructions",
+    (2, 65): "originating_program",
+    (2, 70): "program_version",
+    (2, 80): "byline",
+    (2, 110): "credit",
+    (2, 115): "source",
+    (2, 116): "copyright",
+    (2, 120): "caption",
+}
+
+# Each decoded IPTC value is truncated to this many characters: captions and
+# instruction fields are free text and can be arbitrarily long.
+_IPTC_VALUE_MAX_CHARS = 200
+
+# Meta stamps its own fingerprint into IPTC 2:40 SpecialInstructions on every
+# Facebook/Instagram download: the ASCII marker "FBMD" plus hex digits. Real and
+# generated images carry it alike, so it marks a re-encode, never an edit.
+_FBMD_RE = re.compile(r"^FBMD[0-9a-fA-F]{8,}")
+_FBMD_MARKER = (
+    "IPTC SpecialInstructions carries Meta's 'FBMD' fingerprint (Facebook/Instagram re-encode)"
+)
+#: Short form of ``_FBMD_MARKER`` for the one-line rule-5 note.
+_FBMD_SHORT = "Meta FBMD fingerprint"
+
 
 def _clean_str(value: Any) -> str | None:
     """Decode/strip an EXIF text value; return ``None`` when empty."""
@@ -167,16 +204,130 @@ def _xmp_text(img: Image.Image) -> str | None:
     return xmp.decode("utf-8", "replace") if isinstance(xmp, bytes) else str(xmp)
 
 
-def _editor_markers(img: Image.Image, software: str | None) -> list[str]:
-    """Detect metadata traces left by known photo editors."""
+def _parse_iptc(blob: bytes) -> list[tuple[int, int, bytes]]:
+    """Parse the IPTC-IIM datasets of an APP13 1028 (IPTC-NAA) resource block.
+
+    Every dataset is ``0x1C, record(1), dataset(1), size(2, big-endian),
+    value(size)``. Parsing stops cleanly -- returning whatever was read so far
+    -- at the first malformed byte: a tag marker that is not ``0x1C``, a size
+    word with the high bit set (an extended size, which we do not attempt), or
+    a value running past the end of ``blob``. Never raises.
+    """
+    datasets: list[tuple[int, int, bytes]] = []
+    offset = 0
+    total = len(blob)
+    while offset + 5 <= total:
+        if blob[offset] != 0x1C:
+            break
+        record = blob[offset + 1]
+        dataset = blob[offset + 2]
+        size = int.from_bytes(blob[offset + 3 : offset + 5], "big")
+        if size & 0x8000:  # extended size marker: not supported, stop here
+            break
+        end = offset + 5 + size
+        if end > total:
+            break
+        datasets.append((record, dataset, blob[offset + 5 : end]))
+        offset = end
+    return datasets
+
+
+def _read_app13(resources: dict[int, bytes]) -> dict[str, Any]:
+    """Turn Pillow's parsed APP13 resource map into the analysis of ``_app13_analysis``."""
+    resource_ids = sorted(int(key) for key in resources)
+
+    iptc: dict[str, str] = {}
+    for record, dataset, value in _parse_iptc(bytes(resources.get(_IRB_IPTC_NAA) or b"")):
+        key = _IPTC_FIELDS.get((record, dataset))
+        if key is None or key in iptc:
+            continue
+        text = value.decode("utf-8", "replace").strip()
+        if text:
+            iptc[key] = text[:_IPTC_VALUE_MAX_CHARS]
+
+    platform_markers: list[str] = []
+    if _FBMD_RE.match(iptc.get("special_instructions", "")):
+        platform_markers.append(_FBMD_MARKER)
+
+    editor_markers: list[str] = []
+    other_ids = [rid for rid in resource_ids if rid != _IRB_IPTC_NAA]
+    if other_ids:
+        listed = ", ".join(str(rid) for rid in other_ids[:_IRB_LIST_LIMIT])
+        if len(other_ids) > _IRB_LIST_LIMIT:
+            listed += ", ..."
+        editor_markers.append(f"Photoshop APP13 image-resource blocks present (ids {listed})")
+    program = iptc.get("originating_program")
+    if program:
+        for name in _EDITOR_NAMES:
+            if name.lower() in program.lower():
+                editor_markers.append(f"IPTC OriginatingProgram names {name!r} ({program})")
+                break
+
+    return {
+        "app13_resources": resource_ids,
+        "iptc": iptc,
+        "platform_markers": platform_markers,
+        "editor_markers": editor_markers,
+    }
+
+
+def _app13_analysis(img: Image.Image) -> dict[str, Any]:
+    """Read the Photoshop APP13 segment: resource ids, IPTC fields, markers.
+
+    Pillow parses the APP13 payload for us: ``img.info["photoshop"]`` maps each
+    image-resource id to its raw block data. The returned dict holds
+
+    * ``app13_resources`` -- the resource ids present, ascending, or ``None``
+      when the file carries no APP13 segment (or it could not be read);
+    * ``iptc`` -- the human-readable subset of the IPTC-NAA (1028) datasets,
+      under the stable keys of ``_IPTC_FIELDS``, empty when nothing decoded;
+    * ``platform_markers`` -- re-encode fingerprints that are *not* edit
+      evidence, currently only Meta's ``FBMD`` (see ``_FBMD_RE``);
+    * ``editor_markers`` -- the APP13 share of the editor evidence, for
+      ``_editor_markers`` to append: any resource block beside 1028, or an
+      IPTC 2:65 OriginatingProgram naming one of ``_EDITOR_NAMES``.
+
+    An APP13 whose only block is 1028 and whose OriginatingProgram names no
+    known editor is *not* editor evidence: that is exactly the shape Instagram,
+    Facebook and news agencies write. Any parsing surprise degrades to the same
+    empty analysis as "no APP13" plus an ``app13_error`` entry; this never
+    raises.
+    """
+    empty: dict[str, Any] = {
+        "app13_resources": None,
+        "iptc": {},
+        "platform_markers": [],
+        "editor_markers": [],
+    }
+    resources = img.info.get("photoshop")
+    if not resources:
+        return empty
+    try:
+        return _read_app13(resources)
+    except Exception as exc:
+        return {**empty, "app13_error": f"{type(exc).__name__}: {exc}"}
+
+
+def _editor_markers(
+    img: Image.Image, software: str | None, app13_markers: Sequence[str] = ()
+) -> list[str]:
+    """Detect metadata traces left by known photo editors.
+
+    Reads the EXIF Software tag, the APP13 evidence already worked out by
+    ``_app13_analysis`` (passed in as ``app13_markers``) and the XMP packet.
+
+    Two blind spots are worth naming. A tool that copies a source file's
+    image-resource blocks along -- ImageMagick and some exporters do -- inherits
+    the APP13 editor marker without having edited anything; and a platform
+    re-encode that drops the APP13 segment entirely leaves nothing here to read.
+    """
     markers: list[str] = []
     if software:
         for name in _EDITOR_NAMES:
             if name.lower() in software.lower():
                 markers.append(f"Software tag mentions {name!r} ({software})")
                 break
-    if img.info.get("photoshop"):
-        markers.append("Photoshop APP13 segment present")
+    markers.extend(app13_markers)
 
     xmp_text = _xmp_text(img)
     if xmp_text:
@@ -374,7 +525,8 @@ def _jpeg_quality_info(img: Image.Image) -> dict[str, Any]:
 class MetadataSignal(BaseDetector):
     """Classical signal built purely from image metadata.
 
-    Reads EXIF, XMP, PNG text chunks, the Photoshop APP13 segment, the
+    Reads EXIF, XMP, PNG text chunks, the Photoshop APP13 segment (its
+    image-resource ids and the IPTC-IIM datasets of the 1028 block), the
     embedded EXIF thumbnail, and (for JPEG) the quantization tables from
     :meth:`ForensicImage.open_original`. Requires the original encoded bytes;
     when ``image.raw`` is ``None`` (e.g. built via ``ForensicImage.from_pil``)
@@ -392,14 +544,28 @@ class MetadataSignal(BaseDetector):
        classic sign the image content was swapped after the thumbnail was
        generated.
     3. ``editor_markers`` non-empty -> score 0.70, label "fake". Metadata
-       names a known photo editor (Software tag, Photoshop APP13, XMP
-       history/CreatorTool).
+       names a known photo editor: the Software tag, XMP history/CreatorTool,
+       an APP13 carrying image-resource blocks beside the IPTC-NAA one (1028),
+       or an IPTC OriginatingProgram naming an editor. A bare APP13 whose only
+       block is 1028 does *not* count -- that is a platform or news-agency
+       IPTC record, not an edit (see ``_app13_analysis``). Blind spots: a tool
+       that copies a source file's image-resource blocks along (ImageMagick,
+       some exporters) inherits the marker without having edited anything, and
+       a platform re-encode that drops the APP13 entirely leaves nothing here
+       to read.
     4. ``has_exif`` is ``True`` and ``camera_make`` is set (and, by the
        ordering above, no editor markers were found) -> score 0.30, label
-       "real". Camera-shot metadata with no edit trace.
+       "real". Camera-shot metadata with no edit trace. A platform marker
+       alongside it is simply recorded and does not change the score.
     5. Otherwise -> score 0.50, label "uncertain". No usable metadata
        evidence; most sharing platforms strip EXIF, so this is inconclusive
-       rather than informative of anything.
+       rather than informative of anything. When ``platform_markers`` is
+       non-empty the ``note`` says so: the file was re-encoded by a platform,
+       which is why there is no metadata left to read.
+
+    ``platform_markers`` records re-encode fingerprints (currently Meta's
+    ``FBMD``) that real and generated images carry alike; they never change
+    the score.
 
     Every computed field is placed in ``details``; this signal never raises,
     catching unexpected errors into ``details["error"]`` with score 0.5.
@@ -429,19 +595,26 @@ class MetadataSignal(BaseDetector):
         with Image.open(io.BytesIO(raw)) as img:
             fmt = img.format
             fields = _extract_exif_fields(img)
-            editor_markers = _editor_markers(img, fields["software"])
+            app13 = _app13_analysis(img)
+            editor_markers = _editor_markers(img, fields["software"], app13["editor_markers"])
             ai_markers = _ai_markers(img, fields["software"])
             thumb = _thumbnail_check(img, raw)
             jpeg_info = _jpeg_quality_info(img)
 
+        platform_markers: list[str] = app13["platform_markers"]
         details: dict[str, Any] = {
             "format": fmt,
             **fields,
             "editor_markers": editor_markers,
+            "platform_markers": platform_markers,
             "ai_markers": ai_markers,
+            "app13_resources": app13["app13_resources"],
+            "iptc": app13["iptc"],
             **thumb,
             **jpeg_info,
         }
+        if "app13_error" in app13:
+            details["app13_error"] = app13["app13_error"]
 
         score: float
         label: Label
@@ -455,6 +628,12 @@ class MetadataSignal(BaseDetector):
             score, label = 0.30, "real"
         else:
             score, label = 0.50, "uncertain"
-            details["note"] = "no metadata evidence; metadata is stripped by most platforms"
+            if platform_markers:
+                details["note"] = (
+                    "no editor or camera evidence; the file was re-encoded by a platform "
+                    f"({_FBMD_SHORT}), which rewrites metadata"
+                )
+            else:
+                details["note"] = "no metadata evidence; metadata is stripped by most platforms"
 
         return DetectionResult(detector=self.name, score=score, label=label, details=details)

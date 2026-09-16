@@ -114,3 +114,54 @@ sample **without refitting**, clean level, threshold 0.5:
 Fetch 24 minutes (10,004 files, 3.4 GB, gated); the two full-set clean runs 16 minutes each;
 the two 15-level runs on 2,000 images 1 h 31 min each; the seven signals on the 2,000 images
 17 minutes with four worker processes; the two fusion evaluations seconds.
+
+## Follow-up (2026-09-16): the metadata signal after the APP13 fix
+
+The one code change this benchmark asked for is in. The `metadata` signal now reads the
+APP13 segment's image-resource blocks and the IPTC-IIM datasets of its 1028 (IPTC-NAA) block:
+an editor marker needs a resource block beside 1028 or an IPTC OriginatingProgram naming a
+known editor, and an APP13 whose only block is 1028 counts for nothing. Meta's `FBMD`
+fingerprint in IPTC SpecialInstructions is recorded under `details["platform_markers"]`,
+which never moves the score. A sweep of all 10,000 files shows what the old rule was reading:
+
+| APP13 shape | Real | Generated |
+|---|---|---|
+| 1028 only, `FBMD` fingerprint (Instagram, some Facebook) | 1,314 | 2,401 |
+| 1028 only, news-agency captions and credits (Facebook) | 176 | 7 |
+| no APP13 (all of LinkedIn and X, the rest of Facebook) | 3,510 | 2,592 |
+| any other image-resource block | 0 | 0 |
+
+So the old rule called 3,898 images edited, 1,490 of them real photographs, on the strength
+of a segment no editor wrote, and no ITW-SM image carries a block that would count now.
+Re-running the signal on the same 2,000-image sample
+([`08_itwsm_metadata_fixed.md`](08_itwsm_metadata_fixed.md)) and on the 1,000-image WildRF
+test sample of [`02_wildrf_test_signals.md`](02_wildrf_test_signals.md)
+([`08_wildrf_test_metadata_fixed.md`](08_wildrf_test_metadata_fixed.md)):
+
+| Set | AUC before / after | FPR at 0.5 before / after | TPR at 0.5 before / after |
+|---|---|---|---|
+| ITW-SM sample | 0.583 / 0.500 | 0.308 / 0.000 | 0.474 / 0.001 |
+| WildRF test sample | 0.465 / 0.503 | 0.092 / 0.000 | 0.022 / 0.006 |
+
+On ITW-SM the signal now abstains on every image but one generated image with an AI marker.
+On WildRF, 49 of the 55 images the old rule flagged carried the same `FBMD` fingerprint
+(Facebook downloads and Reddit re-posts of them), 3 carried caption-only IPTC, and the 3 that
+keep their 0.70 are generated images with an XMP edit history, which is a real editor trace.
+The 0.583 in the tables above was never signal: it came from the fingerprint being slightly
+more common on the generated half of the sample.
+
+The two WildRF-fitted fusers, applied cold to the sample again with the new metadata records
+([`08_itwsm_fusion_wildrf_fuser_fixed.md`](08_itwsm_fusion_wildrf_fuser_fixed.md),
+[`08_itwsm_fusion_levels_fuser_fixed.md`](08_itwsm_fusion_levels_fuser_fixed.md)):
+
+| Scorer | n | AUC | Balanced acc. | FPR | TPR | ECE |
+|---|---|---|---|---|---|---|
+| fusion 01 fuser, all images | 2,000 | 0.886 | 0.794 | 0.214 | 0.803 | 0.082 |
+| fusion 01 fuser, outside its band (27.5% called) | 551 | 0.945 | 0.931 | 0.113 | 0.974 | 0.046 |
+| fusion 03 fuser, all images | 2,000 | 0.878 | 0.793 | 0.197 | 0.784 | 0.063 |
+| fusion 03 fuser, outside its band (8.1% called) | 162 | 0.955 | 0.935 | 0.000 | 0.870 | 0.044 |
+
+Nothing moves by more than 0.001 and the fusion 01 band calls 551 images instead of 542: the
+fusers give `metadata` a logit weight of -0.06 (fusion 01) and -0.005 (fusion 03), so an
+input that dropped from 0.70 to 0.50 on 781 images shifts the fused logit by 0.05 at most.
+The fusers were not refitted for this change; the next fit uses the new signal.

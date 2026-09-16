@@ -1,6 +1,6 @@
 # Roadmap
 
-Last updated: 2026-09-10. This document turns the three literature surveys in
+Last updated: 2026-09-16. This document turns the three literature surveys in
 [`docs/research/`](research/) into an ordered build plan. It is a living document: each
 phase ends with a short results note appended to its section.
 
@@ -192,7 +192,10 @@ measured the same way from its first training run.
   images arrive already laundered. The fusion 01 fuser applied cold halves the false-positive
   rate (0.457 to 0.214) and its band calls 27% of images at balanced accuracy 0.931. Found:
   Instagram writes a Photoshop APP13 segment into every image and the `metadata` signal reads
-  it as an editor marker on real and generated images alike. See
+  it as an editor marker on real and generated images alike. Fixed on 2026-09-16: the signal
+  now reads the segment's image-resource blocks and IPTC record, records Meta's `FBMD`
+  fingerprint as a platform marker instead, and abstains on the whole set (false-positive rate
+  30.8% to 0% on the sample), while the cold-applied fusion numbers move by at most 0.001. See
   [`docs/benchmarks/08_itwsm_summary.md`](benchmarks/08_itwsm_summary.md). With Synthbuster and
   ITW-SM measured, Phase 3's cross-dataset exit criterion is met; the per-year decay chart
   remains open.

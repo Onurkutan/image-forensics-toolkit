@@ -27,8 +27,13 @@ from imgforensics.data.manifest import (  # noqa: E402
 )
 from imgforensics.detectors.crops import CropPolicy  # noqa: E402
 from imgforensics.detectors.features import FeatureCache  # noqa: E402
-from imgforensics.detectors.head import HeadOptions  # noqa: E402
-from imgforensics.detectors.train import TrainConfig, train_head  # noqa: E402
+from imgforensics.detectors.head import Calibration, HeadOptions  # noqa: E402
+from imgforensics.detectors.train import (  # noqa: E402
+    TrainConfig,
+    _fit_calibration,
+    _image_ece,
+    train_head,
+)
 
 pytestmark = pytest.mark.ml
 
@@ -221,12 +226,38 @@ def test_calibration_does_not_make_the_probabilities_worse(
 
     report = train_head(config, progress=False)
 
-    assert report.meta.val.ece_after <= report.meta.val.ece_before + 0.01
+    # The contract: calibration is a free win or it is not applied. Whether
+    # this particular tiny fit finds a win depends on where eight epochs of
+    # CPU arithmetic land, which differs between machines, so the test does
+    # not insist that it did -- test_fit_calibration_softens_overconfident_logits
+    # covers the "applied" path on data where a win is guaranteed.
+    assert report.meta.val.ece_after <= report.meta.val.ece_before + 1e-9
     assert report.meta.calibration.temperature > 0.0
-    # On this fixture the fit has real work to do, so it must be applied
-    # rather than rejected in favour of the identity.
-    assert report.meta.val.ece_after < report.meta.val.ece_before
-    assert report.meta.calibration.temperature != pytest.approx(1.0)
+    if report.meta.calibration.temperature == pytest.approx(1.0):
+        assert report.meta.calibration.bias == pytest.approx(0.0)
+        assert report.meta.val.ece_after == pytest.approx(report.meta.val.ece_before)
+
+
+def test_fit_calibration_softens_overconfident_logits() -> None:
+    """Overconfident logits with label noise call for a temperature above one, and get it."""
+    rng = np.random.default_rng(3)
+    n_images, crops = 200, 2
+    image_labels = (np.arange(n_images) % 2).astype(np.float64)
+    # Logits that are far too sure of themselves: +/-8 with the sign flipped
+    # on a fifth of the images, so the raw probabilities sit at 0.9997 or
+    # 0.0003 while only 80% of them are right.
+    flipped = rng.random(n_images) < 0.2
+    sign = np.where(image_labels == 1.0, 1.0, -1.0) * np.where(flipped, -1.0, 1.0)
+    per_image = 8.0 * sign + rng.normal(0.0, 0.5, size=n_images)
+    logits = np.repeat(per_image, crops)
+    image_index = np.repeat(np.arange(n_images), crops)
+
+    calibration = _fit_calibration(logits, image_index, image_labels)
+
+    assert calibration.temperature > 1.0
+    identity_ece = _image_ece(Calibration(), logits, image_index, image_labels)
+    fitted_ece = _image_ece(calibration, logits, image_index, image_labels)
+    assert fitted_ece < identity_ece
 
 
 def test_the_same_seed_reproduces_the_same_run(trained: tuple[TrainConfig, Path]) -> None:

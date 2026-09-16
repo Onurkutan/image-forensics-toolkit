@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import struct
 
 import piexif
 import pytest
@@ -33,6 +34,33 @@ def _jpeg_bytes(
     else:
         image.save(buffer, format="JPEG", exif=exif)
     return buffer.getvalue()
+
+
+def _irb(resource_id: int, data: bytes, name: bytes = b"") -> bytes:
+    """One Photoshop image-resource block ("8BIM"), padded to an even length."""
+    block = b"8BIM" + struct.pack(">H", resource_id) + bytes([len(name)]) + name
+    if len(block) % 2:
+        block += b"\x00"
+    block += struct.pack(">I", len(data)) + data
+    if len(data) % 2:
+        block += b"\x00"
+    return block
+
+
+def _iptc(record: int, dataset: int, value: bytes) -> bytes:
+    """One IPTC-IIM dataset, as it appears inside the 1028 resource block."""
+    return b"\x1c" + bytes([record, dataset]) + struct.pack(">H", len(value)) + value
+
+
+def _with_app13(jpeg: bytes, resources: dict[int, bytes]) -> bytes:
+    """Splice an APP13 ("Photoshop 3.0") segment holding ``resources`` into ``jpeg``."""
+    payload = b"Photoshop 3.0\x00" + b"".join(_irb(rid, data) for rid, data in resources.items())
+    segment = b"\xff\xed" + struct.pack(">H", len(payload) + 2) + payload
+    assert jpeg[:2] == b"\xff\xd8"
+    return jpeg[:2] + segment + jpeg[2:]
+
+
+_FBMD = b"FBMD2300096c01000034580000397700006f9f0000"
 
 
 def test_editor_marker_gives_fake_score() -> None:
@@ -236,3 +264,133 @@ def test_hand_modified_quant_table_is_not_standard() -> None:
 
     assert result.details["jpeg_quant_standard"] is False
     assert result.details["jpeg_quant_quality_exact"] is None
+
+
+# --------------------------------------------------------------------------
+# Photoshop APP13: editor evidence vs. platform re-encode
+# --------------------------------------------------------------------------
+
+
+def test_fbmd_app13_is_a_platform_marker_not_an_editor_marker() -> None:
+    """An Instagram download carries an APP13 whose only block is 1028 and whose
+    only IPTC dataset is Meta's FBMD fingerprint -- a re-encode, not an edit."""
+    data = _with_app13(_jpeg_bytes(), {1028: _iptc(2, 40, _FBMD)})
+    fi = ForensicImage.from_bytes(data)
+
+    result = MetadataSignal().predict(fi)
+
+    assert result.details["editor_markers"] == []
+    assert len(result.details["platform_markers"]) == 1
+    assert "FBMD" in result.details["platform_markers"][0]
+    assert result.details["app13_resources"] == [1028]
+    assert result.details["iptc"]["special_instructions"].startswith("FBMD")
+    assert result.score == pytest.approx(0.50)
+    assert result.label == "uncertain"
+    assert "platform" in result.details["note"]
+    assert "FBMD" in result.details["note"]
+
+
+def test_fbmd_platform_marker_beside_camera_exif_stays_real() -> None:
+    data = _with_app13(_jpeg_bytes(make="Canon", model="EOS"), {1028: _iptc(2, 40, _FBMD)})
+    fi = ForensicImage.from_bytes(data)
+
+    result = MetadataSignal().predict(fi)
+
+    assert result.score == pytest.approx(0.30)
+    assert result.label == "real"
+    assert result.details["editor_markers"] == []
+    assert len(result.details["platform_markers"]) == 1
+
+
+def test_news_agency_iptc_caption_is_not_an_editor_marker() -> None:
+    iptc_block = (
+        _iptc(2, 80, b"Jane Doe")
+        + _iptc(2, 110, b"AFP")
+        + _iptc(2, 116, b"2024 Agence France-Presse")
+        + _iptc(2, 120, b"Demonstrators march through the city centre.")
+    )
+    fi = ForensicImage.from_bytes(_with_app13(_jpeg_bytes(), {1028: iptc_block}))
+
+    result = MetadataSignal().predict(fi)
+
+    assert result.details["editor_markers"] == []
+    assert result.details["platform_markers"] == []
+    assert result.details["iptc"]["byline"] == "Jane Doe"
+    assert result.details["iptc"]["caption"].startswith("Demonstrators march")
+    assert result.details["iptc"]["credit"] == "AFP"
+    assert result.score == pytest.approx(0.50)
+
+
+def test_extra_app13_resource_blocks_give_an_editor_marker() -> None:
+    """A genuine Photoshop save writes further image-resource blocks beside 1028."""
+    resources = {
+        1028: _iptc(2, 120, b"A caption"),
+        1061: b"\x00" * 16,
+        1036: b"\x01\x02\x03\x04",
+    }
+    fi = ForensicImage.from_bytes(_with_app13(_jpeg_bytes(), resources))
+
+    result = MetadataSignal().predict(fi)
+
+    markers = result.details["editor_markers"]
+    assert len(markers) == 1
+    assert "1036" in markers[0] and "1061" in markers[0]
+    assert result.details["app13_resources"] == [1028, 1036, 1061]
+    assert result.score == pytest.approx(0.70)
+    assert result.label == "fake"
+
+
+def test_iptc_originating_program_names_an_editor() -> None:
+    iptc_block = _iptc(2, 65, b"Adobe Photoshop") + _iptc(2, 70, b"25.0")
+    fi = ForensicImage.from_bytes(_with_app13(_jpeg_bytes(), {1028: iptc_block}))
+
+    result = MetadataSignal().predict(fi)
+
+    assert any("Photoshop" in marker for marker in result.details["editor_markers"])
+    assert result.details["iptc"]["originating_program"] == "Adobe Photoshop"
+    assert result.details["iptc"]["program_version"] == "25.0"
+    assert result.score == pytest.approx(0.70)
+    assert result.label == "fake"
+
+
+def test_special_instructions_starting_with_fbmd_but_not_hex_is_ordinary_text() -> None:
+    block = {1028: _iptc(2, 40, b"FBMD notes for the desk")}
+    fi = ForensicImage.from_bytes(_with_app13(_jpeg_bytes(), block))
+
+    result = MetadataSignal().predict(fi)
+
+    assert result.details["platform_markers"] == []
+    assert result.details["editor_markers"] == []
+    assert result.details["iptc"]["special_instructions"] == "FBMD notes for the desk"
+
+
+@pytest.mark.parametrize(
+    "blob",
+    [
+        pytest.param(b"\x1c\x02\x28\x80\x10", id="extended-size"),
+        pytest.param(b"\x1c\x02\x28\x00\x40FB", id="truncated-value"),
+        pytest.param(b"not an iptc record at all", id="no-tag-marker"),
+    ],
+)
+def test_malformed_iptc_is_ignored_without_error(blob: bytes) -> None:
+    """A dataset list we cannot parse is "nothing parsed", not an exception."""
+    fi = ForensicImage.from_bytes(_with_app13(_jpeg_bytes(), {1028: blob}))
+
+    result = MetadataSignal().predict(fi)
+
+    assert result.details["editor_markers"] == []
+    assert result.details["platform_markers"] == []
+    assert result.details["iptc"] == {}
+    assert result.details["app13_resources"] == [1028]
+    assert "error" not in result.details
+    assert "app13_error" not in result.details
+
+
+def test_jpeg_without_app13_reports_no_resources() -> None:
+    fi = ForensicImage.from_bytes(_jpeg_bytes(make="Canon", model="EOS"))
+
+    result = MetadataSignal().predict(fi)
+
+    assert result.details["app13_resources"] is None
+    assert result.details["iptc"] == {}
+    assert result.details["platform_markers"] == []
