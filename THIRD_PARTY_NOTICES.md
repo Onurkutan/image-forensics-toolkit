@@ -9,6 +9,12 @@ further ones are added as later phases integrate them. They are downloaded
 by the user from their original source and are never redistributed by this
 repository (see `docs/ROADMAP.md`, section 7).
 
+The project's own code is licensed under the PolyForm Noncommercial License 1.0.0 (see
+`LICENSE`; MIT until 2026-09-16, and the versions published under MIT stay MIT). The
+third-party code vendored under `src/imgforensics/localization/_vendor/` and
+`src/imgforensics/signals/_vendor/` keeps its own license and notices -- MIT for IML-ViT and
+dwtDct, Apache-2.0 for CAT-Net -- as listed under "Vendored source files" below.
+
 ## Runtime dependencies
 
 | Package | License | commercial_ok |

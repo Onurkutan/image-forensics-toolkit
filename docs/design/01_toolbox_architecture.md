@@ -15,7 +15,7 @@ underneath: calibrated scores with an abstain band, learned detectors and locali
 to the classical signals, and a benchmark harness that says how much each tool is worth.
 
 Sherloq is GPL-3.0 (PySide2) and vendors non-commercial Noiseprint weights. **No code and
-no weights from it can enter this MIT repository.** Its tool catalogue is used here only
+no weights from it can enter this repository.** Its tool catalogue is used here only
 as a checklist of ideas; anything adopted is reimplemented from the underlying papers and
 cited (section 6).
 
@@ -118,7 +118,7 @@ workbench on the API afterwards; the demo is retired once the workbench is deplo
 | Synced multi-view canvas | `<canvas>` + one transform; well trodden | QGraphicsView; native and fast, more code |
 | Large images | tiles from the server; browser memory bounded | native memory; simplest |
 | Portfolio value | live demo link, screenshots, anyone can try it | screenshots only |
-| Licensing | none beyond MIT | PySide6 is LGPL (fine when not statically linked); PyQt is GPL/commercial and is out |
+| Licensing | none beyond the project's own license | PySide6 is LGPL (fine when not statically linked); PyQt is GPL/commercial and is out |
 | Duplication | none: the API is needed for the Space anyway | viewer code that the web demo would not share |
 
 Recommendation: **web first.** It reuses the API the roadmap already promises, gives the
@@ -131,7 +131,7 @@ Decision (2026-09-10): web client. Sections 3.1 and 3.2 are where the work start
 ## 6. Tool catalogue
 
 Sherloq's categories, mapped to what exists and what would be added. "Own" means
-reimplemented from the literature under MIT; nothing is ported from Sherloq.
+reimplemented from the literature under the project's own license; nothing is ported from Sherloq.
 
 | Category | Exists in `imgforensics` | Candidates to add (own implementation) |
 |---|---|---|

@@ -6,7 +6,9 @@ colorTo: blue
 sdk: gradio
 app_file: app.py
 pinned: false
-license: mit
+license: other
+license_name: polyform-noncommercial-1.0.0
+license_link: https://polyformproject.org/licenses/noncommercial/1.0.0/
 ---
 
 # imgforensics on a Hugging Face Space
@@ -76,6 +78,7 @@ analysis -- a demo-only concession, stated on the page, because CAT-Net's DCT st
 original pixels. A CPU Space also decodes JPEG coefficients in pure Python, which is the
 slowest step in the page and the subject of milestone 6e.
 
-This is a research demo. The toolkit is MIT-licensed, its numbers are calibrated on the
+This is a research demo. The toolkit is licensed for non-commercial use only (PolyForm
+Noncommercial 1.0.0), its numbers are calibrated on the
 benchmarks in [`docs/benchmarks/`](../docs/benchmarks/), and none of them is evidence about
 any particular image.

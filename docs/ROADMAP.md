@@ -354,19 +354,22 @@ Never download raw GenImage (about 500 GB), full tampCOCO, GIM or DEAL-300K.
 
 ## 7. Licensing policy
 
-This is a personal, non-commercial, open-source research project. That widens what the
-project may *use*, but not what it may *redistribute*: the repository is MIT-licensed, so
-anything committed to it must be MIT-compatible. Third-party weights and datasets are
+This is a personal, non-commercial, source-available research project, licensed under
+PolyForm Noncommercial License 1.0.0 since 2026-09-16 (MIT before that; the earlier versions stay
+MIT for anyone who obtained them). Being non-commercial widens what the project may *use*, but
+not what it may *redistribute*: anything committed must be redistributable under that license,
+so permissively licensed third-party code (MIT, Apache-2.0, BSD, CC-BY) may be vendored with
+its notices kept, while copyleft code (GPL) may not. Third-party weights and datasets are
 therefore never committed; users download them from the original source through a script
 that prints the license and requires explicit acceptance. `THIRD_PARTY_NOTICES.md` lists
 every external model, dataset and library with its license and how it is used.
 
 | Component | License | Decision |
 |---|---|---|
-| Own code, configs, scripts, docs | MIT | Committed |
+| Own code, configs, scripts, docs | PolyForm Noncommercial 1.0.0 (MIT until 2026-09-16) | Committed |
 | CAT-Net v2, SAFIRE, SPAI, IML-ViT | Apache-2.0 / MIT / CC-BY-4.0 | Default optional extras; weights downloaded from source, never committed |
-| TruFor, Noiseprint++ | Non-commercial (research use) | Allowed for this non-commercial project as a clearly labeled optional extra and benchmark baseline; wrapper code is MIT, weights are user-downloaded, README states the restriction |
-| B-Free | Non-commercial code | Idea reimplemented in MIT code if used; original code is not vendored |
+| TruFor, Noiseprint++ | Non-commercial (research use) | Allowed for this non-commercial project as a clearly labeled optional extra and benchmark baseline; wrapper code is the project's own, weights are user-downloaded, README states the restriction |
+| B-Free | Non-commercial code | Idea reimplemented in the project's own code if used; original code is not vendored |
 | MVSS-Net weights | Not stated (all rights reserved by default) | Benchmark comparison only, downloaded from the authors' link; not shipped or redistributed; authors asked for terms |
 | Community Forensics, CASIA, CocoGlide, AutoSplice, Synthbuster, Chameleon | Research / academic use | Used for training and evaluation only; images never redistributed; cite |
 | TGIF / TGIF2 | CC BY-SA 4.0 | Used for training and evaluation; the ShareAlike clause is why no derived image set is redistributed |

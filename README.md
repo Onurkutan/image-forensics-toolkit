@@ -91,6 +91,8 @@ works. A localizer whose weights are missing does the same.
 | Social media, its own train split seen | [WildRF test](docs/benchmarks/02_experiment_summary.md), 1,000 images | AUC **0.980**, FPR 0.137 at 0.5 |
 | Social media, genuinely unseen | [the same 1,000, WildRF removed from training](docs/benchmarks/06_experiment_03_summary.md) | AUC **0.804**, FPR **0.547** |
 | ... the same, after fusion with the signals | [experiment 03 fuser](docs/benchmarks/06_experiment_03_summary.md) | AUC 0.831, FPR 0.238; on the 20.2% it will call, balanced accuracy 0.887 |
+| Unseen generator families, both classes re-encoded to JPEG | [Synthbuster](docs/benchmarks/07_synthbuster_summary.md), 9 families (5 never seen), 1,800 fakes against 1,000 COCO photographs, `jpeg_q75` | AUC **0.969**, TPR 0.804, FPR 0.033 at 0.5 |
+| In the wild, never seen, four platforms | [ITW-SM](docs/benchmarks/08_itwsm_summary.md), 10,000 images | AUC **0.888**, FPR **0.442** at 0.5; the WildRF fuser applied cold: FPR 0.214, and on the 27% it will call, balanced accuracy 0.931 |
 | Local diffusion edits, image level | [CocoGlide](docs/benchmarks/02_cocoglide.md), 1,024 images | head AUC 0.644 |
 | Local diffusion edits, pixel level | [CocoGlide masks](docs/benchmarks/03_cocoglide_catnet.md), 512 images | `catnet_v2` best-F1 **0.605**, [`iml_vit`](docs/benchmarks/03_cocoglide_iml_vit.md) 0.486 |
 | Recompression and rescaling | [15-level robustness suite](docs/benchmarks/01_val_dinov2.md) | AUC 1.000 through JPEG q50, 0.567 at quarter scale |
@@ -119,6 +121,26 @@ back as `uncertain`. One image in five answered, right about 89% of the time, is
 number here. On the distribution it *has* seen, the same machinery is far stronger:
 [fusion 01](docs/benchmarks/04_fusion_wildrf.md) drops the false-positive rate from 13.7% to
 3.6% and calls 534 of 1,000 images at balanced accuracy 0.996.
+
+**Unseen generator families: 0.969 at JPEG quality 75.** Synthbuster holds nine generator
+families, five of which (DALL-E 2 and 3, Firefly, GLIDE, Midjourney v5) the head never saw.
+With both classes re-encoded to JPEG, so the file format cannot give the answer away, the
+shipped head reaches AUC 0.969 and catches 80.4% of the fakes at a 3.3% false-positive rate;
+per family it catches 65-98%, DALL-E 3 easiest, Midjourney v5 and DALL-E 2 hardest. The clean
+level reads 0.986 and is inflated by Synthbuster's PNG-versus-JPEG split, which is why the JPEG
+row is the one quoted ([Synthbuster](docs/benchmarks/07_synthbuster_summary.md)).
+
+**In the wild, never seen: 0.888, and the real class is again the problem.** ITW-SM holds
+10,000 images collected from Facebook, Instagram, LinkedIn and X, generators unlisted, none of
+it ever in training or calibration. The shipped head catches 93.6% of the generated images and
+calls 44.2% of the real photographs fake at 0.5; LinkedIn is the hard platform (AUC 0.80).
+Recompression barely moves the AUC because the images arrive already laundered. The
+WildRF-fitted fuser, applied without refitting, halves the false-positive rate (0.457 to 0.214
+on a 2,000-image sample) and its abstain band calls 27% of the images at balanced accuracy
+0.931 -- the first evidence that what the fuser learned on one platform mix carries to another
+([ITW-SM](docs/benchmarks/08_itwsm_summary.md)). The same run caught the `metadata` signal reading
+Instagram's APP13 fingerprint as an editor marker on 31% of the real photographs; it now tells a
+platform's IPTC record from an editor's save and abstains on the whole set.
 
 **Local edits: a whole-image head does not see them.** On CocoGlide (authentic COCO images
 against the same images locally inpainted by GLIDE) the head reaches AUC 0.644; a few percent
@@ -236,7 +258,7 @@ misses *in addition*. The literature behind each is in
 
 | Signal | Reads | Blind spots beyond laundering |
 |---|---|---|
-| `metadata` | EXIF/XMP, PNG text chunks, Photoshop APP13, the embedded EXIF thumbnail, JPEG quantization tables; high on a known AI-generator or editor marker, or a thumbnail/image mismatch | Markers are only as good as the list of known tool names; with nothing usable left it abstains at 0.5 rather than guessing |
+| `metadata` | EXIF/XMP, PNG text chunks, the Photoshop APP13 segment (its image-resource blocks and IPTC record), the embedded EXIF thumbnail, JPEG quantization tables; high on a known AI-generator or editor marker, or a thumbnail/image mismatch | Markers are only as good as the list of known tool names. An APP13 holding nothing but an IPTC record is what Facebook, Instagram and news agencies write, so it counts for nothing, and Meta's `FBMD` fingerprint is recorded as a platform marker, not an edit; with nothing usable left it abstains at 0.5 rather than guessing |
 | `ela` | Re-encodes at a fixed JPEG quality and diffs against the original | Bounded to [0.3, 0.65] -- an explanation aid, never a standalone verdict; blind on an already-uniformly-recompressed image |
 | `c2pa` | Any embedded C2PA manifest (`provenance` extra); high when signed as AI-generated, or when the signed content hash no longer matches | A missing manifest proves nothing -- most images, AI-generated ones included, carry none. An untrusted or self-signed signer scores 0.5, not "fake" |
 | `sd_watermark` | Decodes the DWT-DCT ("dwtDct") invisible watermark Stable Diffusion reference pipelines embed, against known payloads | Embeds in chroma only, so it survives neither a JPEG re-encode (even at quality 100, through chroma subsampling) nor a resize; covers the two reference-pipeline payloads, not every SD fork or later generator |
@@ -415,9 +437,12 @@ the original pixels; below the cap the upload's own encoded file is analyzed, so
 
 ## Data and licensing
 
-This is a personal, non-commercial research project. That widens what it may *use* but not what
-it may *redistribute*: the repository is MIT-licensed, so anything committed must be
-MIT-compatible. **No third-party weights, images or datasets are committed here.** They are
+This is a personal, non-commercial research project, and its license says so: the repository is
+released under the [PolyForm Noncommercial License 1.0.0](LICENSE), which permits any non-commercial
+use and forbids commercial use by anyone. Being non-commercial widens what the project may *use*
+but not what it may *redistribute*: anything committed must be redistributable under that license,
+which vendored MIT and Apache-2.0 code is, with its notices kept, and GPL code is not. **No
+third-party weights, images or datasets are committed here.** They are
 downloaded from their original sources through a gate that prints the license and requires
 explicit acceptance, and they keep their own terms.
 
@@ -449,8 +474,13 @@ literature surveys the plan derives from in [docs/research/](docs/research/).
 
 ## License
 
-The code in this repository is released under the MIT license, see [LICENSE](LICENSE).
-Third-party models, weights and datasets are not included in the repository; they are
+The code in this repository is released under the PolyForm Noncommercial License 1.0.0, see
+[LICENSE](LICENSE): you may use, change and share it for any non-commercial purpose, and
+commercial use of any kind is not permitted. Versions published before 2026-09-16 (up to commit
+`0735322`) were released under the MIT license and stay available under it. The vendored IML-ViT
+and CAT-Net model definitions and the dwtDct watermark decoder keep their own MIT and Apache-2.0
+licenses and notices. Third-party models, weights and datasets are not included in the
+repository; they are
 downloaded from their original sources and keep their own licenses, some of which permit
 research use only. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the current library
 list; models and datasets are added there as they are integrated.

@@ -70,8 +70,9 @@ DEFAULT_DESCRIPTION = (
     "(https://github.com/Onurkutan/image-forensics-toolkit) tools on it: classical JPEG and "
     "noise signals, learned manipulation localizers, and a calibrated fused verdict with an "
     "abstain band.\n\n"
-    "The toolkit is MIT-licensed. The pretrained weights it downloads are not -- each carries "
-    "its own license, printed before anything is fetched -- and the DINOv2 AI-generation head "
+    "The toolkit is licensed for non-commercial use only (PolyForm Noncommercial 1.0.0). The "
+    "pretrained weights it downloads carry their own licenses, each printed before anything is "
+    "fetched, and the DINOv2 AI-generation head "
     "is trained on research-only data and published separately under a research-only card. "
     "This is a research demo: no score here, fused or otherwise, is evidence about an image."
 )
