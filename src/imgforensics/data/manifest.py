@@ -193,6 +193,7 @@ def build_manifest(
     generator_of: Callable[[Path], str | None] | None = None,
     split_of: Callable[[Path], Split | None] | None = None,
     mask_of: Callable[[Path], Path | None] | None = None,
+    extra_of: Callable[[Path], dict[str, str]] | None = None,
     license: str | None = None,
     commercial_ok: bool | None = None,
     extensions: Iterable[str] = DEFAULT_EXTENSIONS,
@@ -221,6 +222,8 @@ def build_manifest(
         split_of: Optional map to a train/val/test split.
         mask_of: Optional map to a mask file path (absolute, or relative to
             ``root``); stored as a root-relative POSIX path.
+        extra_of: Optional map to per-file facts stored in the entry's
+            ``extra`` (an empty dict when there are none).
         license: Recorded in ``meta.license``.
         commercial_ok: Recorded in ``meta.commercial_ok``.
         extensions: Case-insensitive file extensions to consider.
@@ -276,6 +279,7 @@ def build_manifest(
                 height=height,
                 format=fmt,
                 jpeg_quality=jpeg_quality,
+                extra=extra_of(file_path) if extra_of else {},
             )
         )
 
@@ -660,6 +664,11 @@ def _cropped_entry(
         format=fmt,
         jpeg_quality=jpeg_quality,
         extra={
+            # The source entry's own facts survive the crop (TGIF's variant /
+            # mask_type / variation are what pairs reals and fakes at matching
+            # geometry, and a crop does not change them); the crop's own keys
+            # win on a name collision.
+            **source_entry.extra,
             "source_path": source_entry.path,
             "crop_mode": crop_mode,
             "crop_size": crop_size,

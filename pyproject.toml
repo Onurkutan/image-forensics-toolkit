@@ -74,6 +74,14 @@ ml = [
     "torchvision>=0.17",
     "timm>=1.0",
     "safetensors>=0.4",
+    # libjpeg behind a stable-ABI wheel (win_amd64, manylinux2014_x86_64,
+    # both macOS architectures), which is what lets
+    # imgforensics.localization._jpegcoef stop entropy-decoding in Python.
+    # It sits in this extra rather than beside numpy because catnet_v2 is the
+    # only caller and this extra is what makes catnet_v2 runnable at all; a
+    # base install keeps the pure-Python decoder, which is also the fallback
+    # wherever no wheel exists (Linux aarch64, musl).
+    "jpeglib>=1.0,<2",
 ]
 
 [project.urls]

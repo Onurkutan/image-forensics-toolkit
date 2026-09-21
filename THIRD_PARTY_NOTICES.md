@@ -37,7 +37,10 @@ not installed, rather than failing. The `ml` extra is the exception to that
 pattern: it backs the learned detectors rather than a signal, so the
 `imgforensics features` commands print an install hint and exit 1 when it is
 missing (`imgforensics.detectors.is_ml_available()` reports the same thing in
-code).
+code). `jpeglib` is a second exception: it only makes
+`imgforensics.localization._jpegcoef` faster, and without it that module
+falls back to its own pure-Python decoder with identical output, so nothing
+degrades and nothing is printed.
 
 | Package | Extra | License | commercial_ok |
 |---|---|---|---|
@@ -49,6 +52,7 @@ code).
 | torchvision | `ml` | BSD-3-Clause | yes |
 | timm | `ml` | Apache-2.0 | yes |
 | safetensors | `ml` | Apache-2.0 | yes |
+| jpeglib | `ml` | MPL-2.0 | yes |
 
 ## Model weights
 

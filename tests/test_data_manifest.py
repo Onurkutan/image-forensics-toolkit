@@ -723,3 +723,23 @@ def test_crop_entries_report_is_a_crop_report(tmp_path: Path) -> None:
     manifest = _build_mixed_resolution_manifest(tmp_path, n=1)
     _, report = crop_entries(manifest, tmp_path / "out", size=512, mode="center", progress=False)
     assert isinstance(report, CropReport)
+
+
+def test_crop_entries_keeps_the_source_entry_extra(tmp_path: Path) -> None:
+    """A crop must not drop dataset facts recorded in `extra`.
+
+    TGIF stores which authentic variant (or which mask type and variation) an
+    entry is there, and those are exactly what pairs reals and fakes at
+    matching geometry after a crop pass.
+    """
+    manifest = _build_mixed_resolution_manifest(tmp_path, n=1)
+    for entry in manifest.entries:
+        entry.extra = {"variant": "orig", "crop_mode": "from the source entry"}
+
+    cropped, _ = crop_entries(
+        manifest, tmp_path / "out", size=512, mode="center", labels=("real",), progress=False
+    )
+
+    real = next(entry for entry in cropped.entries if entry.label == "real")
+    assert real.extra["variant"] == "orig"
+    assert real.extra["crop_mode"] == "center"  # the crop's own keys win on a collision

@@ -1,4 +1,4 @@
-"""Tests for the pure-numpy JPEG coefficient reader.
+"""Tests for the JPEG coefficient reader and its two decoding paths.
 
 No torch, no weights, no network: this is the piece CAT-Net's DCT stream is
 fed from, and it is checked against Pillow's own libjpeg two ways.
@@ -18,23 +18,49 @@ fed from, and it is checked against Pillow's own libjpeg two ways.
 The tables are also compared against ``Image.quantization`` directly, which
 pins down the natural (de-zigzagged) ordering both this module and ``jpegio``
 use.
+
+Both checks run twice, through the ``decode`` fixture: once as
+``read_luma_coefficients`` resolves itself (libjpeg when ``jpeglib`` is
+installed) and once with the ``jpeglib`` import forced to fail, so the
+pure-Python fallback keeps its own coverage instead of becoming dead code the
+day the fast path started answering everything. On top of that,
+``test_the_two_decoders_agree_*`` asserts the two return *identical* arrays,
+which is the claim the fast path is allowed to exist on.
 """
 
 from __future__ import annotations
 
 import io
+import tempfile
+import warnings
+from collections.abc import Callable
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from conftest import natural_like_image
 from PIL import Image
 
+from imgforensics.localization import _jpegcoef
 from imgforensics.localization._jpegcoef import (
+    JpegCoefficients,
     UnsupportedJpegError,
     read_luma_coefficients,
 )
 
 _SIZE = (131, 77)  # (width, height): neither side a multiple of 8
+
+#: Real JPEGs to sweep, when this checkout has the dataset (it is never
+#: committed, so CI skips the sweep).
+_REAL_DIR = Path(__file__).resolve().parents[1] / "data" / "raw" / "ITW-SM" / "0_real"
+#: Files the cheap accept/refuse invariant is checked on, strided across the
+#: sorted listing so every platform prefix is represented.
+_REAL_FILES = 20
+#: Files decoded both ways and compared array-for-array. The pure-Python
+#: decoder costs seconds per megapixel, so these are the cheapest accepted
+#: files rather than the first ones.
+_REAL_COMPARISONS = 12
 
 
 def _idct_basis() -> np.ndarray:
@@ -75,23 +101,36 @@ def _encoded(**options: object) -> bytes:
     return buffer.getvalue()
 
 
-@pytest.mark.parametrize(
-    ("label", "options"),
-    [
-        ("4:4:4 q90", {"quality": 90, "subsampling": 0}),
-        ("4:2:0 q75", {"quality": 75, "subsampling": 2}),
-        ("4:2:2 q80", {"quality": 80, "subsampling": 1}),
-        ("q100", {"quality": 100, "subsampling": 0}),
-        ("optimized q85", {"quality": 85, "optimize": True}),
-        ("restart every row", {"quality": 85, "restart_marker_rows": 1}),
-        ("restart every 7 blocks", {"quality": 85, "restart_marker_blocks": 7}),
-    ],
-)
+#: The encodings both paths are checked on: the subsampling ratios, the two
+#: ways of writing restart markers, an optimized (non-default Huffman table)
+#: file, and the quality-100 4:4:4 stream CAT-Net makes of every non-JPEG.
+_ENCODINGS = [
+    ("4:4:4 q90", {"quality": 90, "subsampling": 0}),
+    ("4:2:0 q75", {"quality": 75, "subsampling": 2}),
+    ("4:2:2 q80", {"quality": 80, "subsampling": 1}),
+    ("q100", {"quality": 100, "subsampling": 0}),
+    ("optimized q85", {"quality": 85, "optimize": True}),
+    ("restart every row", {"quality": 85, "restart_marker_rows": 1}),
+    ("restart every 7 blocks", {"quality": 85, "restart_marker_blocks": 7}),
+]
+
+
+@pytest.fixture(params=["as installed", "python only"])
+def decode(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> Callable[[bytes], JpegCoefficients]:
+    """``read_luma_coefficients``, once as it resolves and once without libjpeg."""
+    if request.param == "python only":
+        monkeypatch.setattr(_jpegcoef, "_libjpeg", lambda: None)
+    return read_luma_coefficients
+
+
+@pytest.mark.parametrize(("label", "options"), _ENCODINGS)
 def test_dequantizing_and_inverting_the_coefficients_reproduces_libjpegs_pixels(
-    label: str, options: dict[str, object]
+    decode: Callable[[bytes], JpegCoefficients], label: str, options: dict[str, object]
 ) -> None:
     data = _encoded(**options)
-    decoded = read_luma_coefficients(data)
+    decoded = decode(data)
 
     blocks = _as_blocks(decoded.coefficients).astype(np.float64) * decoded.quantization
     pixels = np.einsum("ux,rcuv,vy->rcxy", _BASIS, blocks, _BASIS) + 128.0
@@ -110,10 +149,10 @@ def test_dequantizing_and_inverting_the_coefficients_reproduces_libjpegs_pixels(
 
 @pytest.mark.parametrize(("quality", "tolerance"), [(75, 0), (95, 1)])
 def test_requantizing_libjpegs_pixels_recovers_the_same_coefficients(
-    quality: int, tolerance: int
+    decode: Callable[[bytes], JpegCoefficients], quality: int, tolerance: int
 ) -> None:
     data = _encoded(quality=quality, subsampling=0)
-    decoded = read_luma_coefficients(data)
+    decoded = decode(data)
 
     luma = _libjpeg_luma(data).astype(np.float64) - 128.0
     padded = np.zeros(decoded.coefficients.shape, dtype=np.float64)
@@ -132,20 +171,24 @@ def test_requantizing_libjpegs_pixels_recovers_the_same_coefficients(
     assert difference.max() <= tolerance
 
 
-def test_the_quantization_table_matches_pillows_in_natural_order() -> None:
+def test_the_quantization_table_matches_pillows_in_natural_order(
+    decode: Callable[[bytes], JpegCoefficients],
+) -> None:
     data = _encoded(quality=72)
     with Image.open(io.BytesIO(data)) as image:
         expected = np.asarray(image.quantization[0], dtype=np.int32).reshape(8, 8)
 
-    assert np.array_equal(read_luma_coefficients(data).quantization, expected)
+    assert np.array_equal(decode(data).quantization, expected)
 
 
-def test_a_grayscale_jpeg_decodes_through_the_single_component_path() -> None:
+def test_a_grayscale_jpeg_decodes_through_the_single_component_path(
+    decode: Callable[[bytes], JpegCoefficients],
+) -> None:
     buffer = io.BytesIO()
     natural_like_image(size=_SIZE, seed=3).convert("L").save(buffer, format="JPEG", quality=88)
     data = buffer.getvalue()
 
-    decoded = read_luma_coefficients(data)
+    decoded = decode(data)
     blocks = _as_blocks(decoded.coefficients).astype(np.float64) * decoded.quantization
     pixels = np.einsum("ux,rcuv,vy->rcxy", _BASIS, blocks, _BASIS) + 128.0
     reconstructed = _as_spatial(np.clip(np.round(pixels), 0, 255).astype(np.int32))
@@ -155,16 +198,230 @@ def test_a_grayscale_jpeg_decodes_through_the_single_component_path() -> None:
     assert np.abs(reconstructed[: _SIZE[1], : _SIZE[0]] - reference).max() <= 1
 
 
-def test_a_progressive_jpeg_is_rejected_by_name() -> None:
+def test_a_progressive_jpeg_is_rejected_by_name(
+    decode: Callable[[bytes], JpegCoefficients],
+) -> None:
     data = _encoded(quality=85, progressive=True)
 
     with pytest.raises(UnsupportedJpegError, match="progressive"):
-        read_luma_coefficients(data)
+        decode(data)
 
 
-def test_a_file_that_is_not_a_jpeg_is_rejected() -> None:
+def test_a_file_that_is_not_a_jpeg_is_rejected(
+    decode: Callable[[bytes], JpegCoefficients],
+) -> None:
     buffer = io.BytesIO()
     natural_like_image(size=(16, 16), seed=1).save(buffer, format="PNG")
 
     with pytest.raises(UnsupportedJpegError, match="not a JPEG"):
-        read_luma_coefficients(buffer.getvalue())
+        decode(buffer.getvalue())
+
+
+# --- the libjpeg fast path -----------------------------------------------------
+
+_needs_libjpeg = pytest.mark.skipif(
+    _jpegcoef._libjpeg() is None, reason="jpeglib is not installed (the 'ml' extra)"
+)
+
+
+def _assert_identical(data: bytes, label: str) -> None:
+    """The two paths return the same arrays, dtypes, shape and dimensions."""
+    fast = _jpegcoef._decode_with_libjpeg(data)
+    assert fast is not None, f"{label}: the fast path refused a stream it should read"
+    slow = _jpegcoef._decode_in_python(data)
+
+    assert fast.coefficients.dtype == slow.coefficients.dtype, label
+    assert fast.coefficients.shape == slow.coefficients.shape, label
+    assert np.array_equal(fast.coefficients, slow.coefficients), label
+    assert np.array_equal(fast.quantization, slow.quantization), label
+    assert fast.quantization.dtype == slow.quantization.dtype, label
+    assert (fast.height, fast.width) == (slow.height, slow.width), label
+
+
+@_needs_libjpeg
+@pytest.mark.parametrize(("label", "options"), _ENCODINGS)
+def test_the_two_decoders_agree_bit_for_bit(label: str, options: dict[str, object]) -> None:
+    _assert_identical(_encoded(**options), label)
+
+
+@_needs_libjpeg
+def test_the_two_decoders_agree_on_a_grayscale_jpeg() -> None:
+    buffer = io.BytesIO()
+    natural_like_image(size=_SIZE, seed=3).convert("L").save(buffer, format="JPEG", quality=88)
+
+    _assert_identical(buffer.getvalue(), "grayscale q88")
+
+
+@_needs_libjpeg
+@pytest.mark.parametrize(
+    ("label", "make"),
+    [
+        ("progressive", lambda: _encoded(quality=85, progressive=True)),
+        ("truncated", lambda: _encoded(quality=85)[:-200]),
+        ("not a JPEG", lambda: b"\x89PNG\r\n\x1a\n" + b"\x00" * 64),
+        ("empty", lambda: b""),
+        ("SOI only", lambda: b"\xff\xd8"),
+    ],
+)
+def test_the_fast_path_refuses_what_it_would_read_differently(
+    label: str, make: Callable[[], bytes]
+) -> None:
+    # Refusing means falling back, not failing: whatever the Python decoder
+    # did with these streams -- raise by name, or pad a truncated one with
+    # zero bits -- is still what the caller gets.
+    assert _jpegcoef._decode_with_libjpeg(make()) is None, label
+
+
+@_needs_libjpeg
+def test_read_luma_coefficients_uses_the_fast_path_when_it_can() -> None:
+    data = _encoded(quality=90, subsampling=0)
+
+    assert _jpegcoef._reads_identically(data)
+    assert np.array_equal(
+        read_luma_coefficients(data).coefficients,
+        _jpegcoef._decode_with_libjpeg(data).coefficients,
+    )
+
+
+@_needs_libjpeg
+@pytest.mark.skipif(not _REAL_DIR.is_dir(), reason=f"{_REAL_DIR} is not in this checkout")
+def test_the_two_decoders_agree_on_real_jpegs() -> None:
+    """Sweep real in-the-wild JPEGs: platform encoders, EXIF, odd Huffman tables.
+
+    Two passes, because the two things worth checking have opposite costs.
+
+    The accept/refuse invariant -- the fast path answers exactly when
+    :func:`_reads_identically` says it may -- is free, so it runs on
+    :data:`_REAL_FILES` files strided across the sorted listing. The stride
+    matters: the names sort into one block per platform, so the first twenty
+    are all Facebook's. 80% of ITW-SM is progressive (X, Instagram and
+    LinkedIn re-encode that way and every one of those is refused); Facebook
+    writes baseline, which is why a strided sample still has files to compare.
+
+    The array-for-array comparison costs a Python decode, seconds per
+    megapixel, so it takes the :data:`_REAL_COMPARISONS` cheapest accepted
+    files by size on disk -- about five seconds for a dozen of them.
+    """
+    paths = sorted(_REAL_DIR.glob("*.jpg"))
+    assert paths, f"{_REAL_DIR} holds no .jpg files"
+
+    step = max(1, len(paths) // _REAL_FILES)
+    for path in paths[::step][:_REAL_FILES]:
+        data = path.read_bytes()
+        if not _jpegcoef._reads_identically(data):
+            assert _jpegcoef._decode_with_libjpeg(data) is None, path.name
+
+    compared = 0
+    for path in sorted(paths, key=lambda candidate: candidate.stat().st_size):
+        if compared >= _REAL_COMPARISONS:
+            break
+        data = path.read_bytes()
+        if not _jpegcoef._reads_identically(data):
+            continue
+        _assert_identical(data, path.name)
+        compared += 1
+
+    assert compared == _REAL_COMPARISONS, f"only {compared} of {len(paths)} files were comparable"
+
+
+def _entropy_start(data: bytes) -> int:
+    """Offset of the first byte of entropy-coded data, just past the scan header."""
+    position = 2
+    while position < len(data):
+        while data[position] == 0xFF:
+            position += 1
+        marker = data[position]
+        position += 1
+        if marker in {0xD8, 0x01} or 0xD0 <= marker <= 0xD7:
+            continue
+        length = int.from_bytes(data[position : position + 2], "big")
+        position += length
+        if marker == 0xDA:
+            return position
+    raise AssertionError("no scan header in the fixture")
+
+
+@_needs_libjpeg
+def test_corrupt_entropy_data_can_part_the_two_decoders() -> None:
+    """The one divergence there is, pinned here so it is not rediscovered.
+
+    :func:`_reads_identically` gates on the *markers*; it cannot see that the
+    entropy-coded data behind them is damaged. When it is, libjpeg
+    resynchronizes and this project's decoder does not, and libjpeg sometimes
+    returns coefficients where the other raises. That is documented rather
+    than fixed -- reading libjpeg's warnings would mean capturing C stderr,
+    and a corrupt JPEG has no one right answer anyway -- so this test asserts
+    the divergence exists rather than that it does not.
+    """
+    data = _encoded(quality=85)
+    start = _entropy_start(data)
+
+    for offset in range(start, min(start + 200, len(data) - 2)):
+        damaged = bytearray(data)
+        damaged[offset] ^= 0x01
+        candidate = bytes(damaged)
+        if not _jpegcoef._reads_identically(candidate):
+            continue
+        fast = _jpegcoef._decode_with_libjpeg(candidate)
+        try:
+            _jpegcoef._decode_in_python(candidate)
+        except UnsupportedJpegError:
+            if fast is not None:
+                return  # libjpeg read what the Python decoder gave up on
+
+    pytest.fail("no single-byte corruption parted the two decoders; the caveat may be stale")
+
+
+@_needs_libjpeg
+def test_a_non_ascii_temporary_directory_disables_the_fast_path_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """libjpeg's C ``fopen`` cannot reach such a path, so it is refused up front.
+
+    Both module globals are set through ``monkeypatch`` so pytest puts them
+    back: leaving the fast path disabled would quietly slow down every test
+    after this one.
+    """
+    directory = tmp_path / "geçici-örnek"
+    directory.mkdir()
+    monkeypatch.setattr(_jpegcoef, "_LIBJPEG_DISABLED", False)
+    monkeypatch.setattr(tempfile, "tempdir", str(directory))
+    data = _encoded(quality=90, subsampling=0)
+
+    with pytest.warns(RuntimeWarning, match="not an ASCII path"):
+        assert _jpegcoef._decode_with_libjpeg(data) is None
+    assert _jpegcoef._LIBJPEG_DISABLED
+
+    # Refused again, and silently: the warning is a once-per-process notice,
+    # not one per image.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert _jpegcoef._decode_with_libjpeg(data) is None
+
+    # And the caller still gets its coefficients, from the fallback.
+    assert read_luma_coefficients(data).coefficients.shape == (80, 136)
+
+
+def test_an_unexpected_libjpeg_array_shape_falls_back_instead_of_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shape surprise must not escape as a bare ``ValueError``.
+
+    ``UnsupportedJpegError`` is a ``ValueError`` subclass, so a reshape that
+    raised on its own would slip straight through every ``except
+    UnsupportedJpegError`` between here and the API's generic handler.
+    """
+
+    class _BadJpeg:
+        Y = np.zeros((10, 17, 7, 9), dtype=np.int16)  # not 8x8 blocks
+        qt = np.ones((2, 8, 8), dtype=np.uint16)
+        quant_tbl_no = np.array([0, 1, 1])
+        height, width = _SIZE[1], _SIZE[0]
+
+    monkeypatch.setattr(
+        _jpegcoef, "_libjpeg", lambda: SimpleNamespace(read_dct=lambda path: _BadJpeg())
+    )
+    data = _encoded(quality=90, subsampling=0)
+
+    assert _jpegcoef._decode_with_libjpeg(data) is None
+    assert read_luma_coefficients(data).coefficients.shape == (80, 136)

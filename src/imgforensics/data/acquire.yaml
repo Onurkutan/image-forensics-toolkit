@@ -126,24 +126,57 @@ recipes:
 
   - dataset: "TGIF"
     subset_note: >-
-      Hosted on a custom download service (cloud.ilabt.imec.be) behind
-      per-visit, expiring access tokens rather than a stable URL (verified
-      against the project README on 2026-09-09) -- there is nothing
-      scriptable to fetch, so this is a manual step.
+      Hosted on an imec Nextcloud public share (cloud.ilabt.imec.be). The
+      share link and its per-folder download URLs are stable -- an earlier
+      note here claimed a per-visit expiring token, which is wrong; what
+      is streamed rather than stored is only the zip the server builds on
+      the fly, so a download cannot be resumed and has no length or
+      checksum to verify against. 65.4 GB over six folders, downloaded one
+      at a time; this stays a manual step because a browser handles those
+      multi-hour streamed downloads far better than a fetch helper would
+      (verified against the share on 2026-09-21).
     steps:
       - method: manual
         instructions: |
-          TGIF has no stable download URL: cloud.ilabt.imec.be issues a
-          fresh, signed link each time the download page is visited.
+          TGIF is one Nextcloud public share:
+          https://cloud.ilabt.imec.be/index.php/s/xEeAzrY7ES9KA8o
+          (reachable from https://github.com/IDLabMedia/tgif-dataset).
 
-          1. Open https://github.com/IDLabMedia/tgif-dataset and follow
-             the "Download all TGIF images" link (add the TGIF2 FLUX/random
-             links too if you want the 2026 extension).
-          2. Extract so this dataset's root contains the top-level folders
-             documented in that README: masks/, original/, SD2-sp/,
-             PS-sp/, SD2-fr/, SDXL-fr/ (plus the TGIF2 flux1*/masks-*
-             folders if downloaded), each split into training/validation/testing.
-          3. License is CC BY-SA 4.0 (ShareAlike): any redistributed
+          1. Download the six folders, each as its own zip, from the stable
+             per-folder URL
+             https://cloud.ilabt.imec.be/index.php/s/xEeAzrY7ES9KA8o/download?path=%2F&files=<folder>
+             with <folder> one of (sizes as the share reports them):
+               masks    40 MB    the inpainting masks, all sizes
+               orig     6.8 GB   the authentic images and their two crops
+               sd2-fr   7.1 GB   SD2, fully regenerated, 512x512
+               sdxl-fr  17.3 GB  SDXL, fully regenerated, 1024-crop size
+               sd2-sp   17.3 GB  SD2, spliced back into the full-size original
+               ps-sp    16.8 GB  Photoshop/Firefly generative fill, spliced
+             Fetch masks/ and orig/ first: together they are under 7 GB and
+             already make a usable real-only manifest, and every fake
+             subset is paired against them.
+          2. Each zip contains <folder>/<folder>_training.tar.gz,
+             _validation.tar.gz and _testing.tar.gz. Unzip, then untar each
+             tarball so this dataset's root ends up holding
+             <folder>/<split>/<COCO category>/<file>, e.g.
+             orig/testing/airplane/134886_orig.png and
+             masks/testing/airplane/134886_mask_bbox.png_ps_mask.png.
+             The folder names are lower-case exactly as above (the project
+             README's original/, SD2-sp/, ... spelling is not what the
+             share serves), and the layout in layouts.yaml depends on that
+             shape -- not on what the root folder itself is called, which
+             is always passed explicitly.
+          3. Fix one upstream packaging bug: sd2-fr_validation.tar.gz
+             nests the COCO category "train" twice, so after untarring you
+             have sd2-fr/validation/train/train/. Move those 168 files up
+             one level (and remove the empty inner folder), so they sit at
+             sd2-fr/validation/train/ like every other category. Left as
+             unpacked they are still labeled and split correctly, but the
+             layout gives them no mask and no `extra`, because nothing at
+             that depth matches its regexes.
+          4. TGIF2's FLUX and random-mask folders are a separate download
+             and are not covered by this recipe or by the TGIF layout.
+          5. License is CC BY-SA 4.0 (ShareAlike): any redistributed
              derivative built from these images must carry the same license.
 
   - dataset: "ITW-SM"

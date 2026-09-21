@@ -1,0 +1,32 @@
+# Hypothesis-A probe for experiment 04 (2026-09-21): does simulated platform laundering
+# (downscale, then JPEG) make the head call COCO photographs fake? COCO test images have a
+# 640 px long side, so max_side 448 / 320 are scale 0.7 / 0.5 followed by JPEG q80; the
+# social_1080_q80 level does not resize them at all and is the JPEG-only control.
+version: 1
+levels:
+- name: clean
+  kind: clean
+  params: {}
+- name: jpeg_q75
+  kind: jpeg
+  params:
+    quality: 75
+- name: resize_0.5
+  kind: resize
+  params:
+    scale: 0.5
+- name: social_1080_q80
+  kind: social
+  params:
+    max_side: 1080
+    quality: 80
+- name: launder_s0.7_q80
+  kind: social
+  params:
+    max_side: 448
+    quality: 80
+- name: launder_s0.5_q80
+  kind: social
+  params:
+    max_side: 320
+    quality: 80

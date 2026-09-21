@@ -66,27 +66,103 @@ layouts:
       this manifest, not just before evaluating on it.
 
   - dataset: "TGIF"
-    real_globs: ["original/**"]
-    fake_globs: ["SD2-sp/**", "PS-sp/**", "SD2-fr/**", "SDXL-fr/**"]
+    real_globs: ["orig/**"]
+    fake_globs: ["sd2-sp/**", "ps-sp/**", "sd2-fr/**", "sdxl-fr/**"]
     generator_from: "regex"
     generator_regex: "^(?P<gen>[^/]+)/"
     split_from: "regex"
     split_regex: "/(?P<split>training|validation|testing)/"
     split_map: { "training": "train", "validation": "val", "testing": "test" }
     mask_template: null
+    mask_rules:
+      - regex: '^sd2-fr/(?P<split>[^/]+)/(?P<cat>[^/]+)/(?P<id>[0-9]+)_mask_(?P<type>bbox|segm)\.png_sd2-512_[0-9]+\.png$'
+        template: "masks/{split}/{cat}/{id}_mask_{type}_512.png"
+      - regex: '^sdxl-fr/(?P<split>[^/]+)/(?P<cat>[^/]+)/(?P<id>[0-9]+)_mask_(?P<type>bbox|segm)\.png_sdxl-1024_[0-9]+\.png$'
+        template: "masks/{split}/{cat}/{id}_mask_{type}_1024.png"
+      - regex: '^sd2-sp/(?P<split>[^/]+)/(?P<cat>[^/]+)/(?P<id>[0-9]+)_mask_(?P<type>bbox|segm)\.png_ps_mask\.png_sd2_[0-9]+\.png$'
+        template: "masks/{split}/{cat}/{id}_mask_{type}.png_ps_mask.png"
+      - regex: '^ps-sp/(?P<split>[^/]+)/(?P<cat>[^/]+)/(?P<id>[0-9]+)_mask_(?P<type>bbox|segm)\.png_ps_[0-9]+\.png$'
+        template: "masks/{split}/{cat}/{id}_mask_{type}.png_ps_mask.png"
+    extra_regex: '^(?:orig/[^/]+/[^/]+/[0-9]+_(?P<variant>orig(?:_512|_1024)?)\.png|(?:sd2-fr|sdxl-fr|sd2-sp|ps-sp)/[^/]+/[^/]+/[0-9]+_mask_(?P<mask_type>bbox|segm)\.png(?:_ps_mask\.png)?_(?:sd2-512|sdxl-1024|sd2|ps)_(?P<variation>[0-9]+)\.png)$'
     exclude_globs: []
     notes: >-
-      Top-level folder names (masks, original, SD2-sp, PS-sp, SD2-fr,
-      SDXL-fr) and the training/validation/testing split-per-folder
-      structure are verified against the project README on 2026-09-09;
-      TGIF2's additional flux1*/masks-* folders are not covered here (add
-      them to fake_globs once downloaded). mask_template is deliberately
-      left unset: the README documents multiple mask-naming variants
-      (mask type -- bbox/segm/random -- crossed with crop size) without a
-      single confirmed filename pattern relating a fake image to its mask,
-      so a guessed template would silently mismatch rather than fail
-      loudly. Masks in this dataset must be wired up by hand until that
-      convention is confirmed against an actual downloaded copy.
+      Verified against the extracted download on 2026-09-21, which is not
+      what the project README spells: the six folders the imec Nextcloud
+      share serves are lower-case and one of them is `orig`, not
+      `original` (masks, orig, sd2-fr, sdxl-fr, sd2-sp, ps-sp), each
+      holding training/validation/testing, each holding one folder per COCO
+      category -- category names may contain a space ("hair drier",
+      "sports ball"), which is why every regex here matches a path segment
+      as [^/]+ rather than \w+. TGIF2's flux1*/masks-* folders are a
+      separate download and are not covered (add them to fake_globs and a
+      fifth mask rule once fetched).
+
+      One packaging quirk, in the archive itself rather than in the
+      unpacking: sd2-fr_validation.tar.gz stores the COCO category "train"
+      one level too deep, as sd2-fr/validation/train/train/<file> -- the
+      only directory in the whole tree deeper than
+      <folder>/<split>/<category>. Those 168 files still get the right
+      label, generator and split, but neither the mask rules nor
+      extra_regex match a path at that depth, so they come out with
+      mask_path null AND an empty extra (no mask_type, no variation);
+      prepare() reports them under "matched no rule". That is deliberate:
+      an optional extra path segment in the rules would hide an upstream
+      bug that is better fixed by moving the folder up one level (or
+      accepted, at 168 of 18,744 sd2-fr fakes).
+
+      File naming, per id (a COCO image id): orig/ holds <id>_orig.png (the
+      authentic image at its own size, e.g. 1024x768), <id>_orig_1024.png
+      (the crop the 1024-px pipelines ran on, e.g. 1016x776) and
+      <id>_orig_512.png (the 512x512 crop the SD2 pipelines ran on); all
+      three are labeled real, and extra_regex records which one an entry is
+      under extra.variant (orig / orig_512 / orig_1024), so each fake
+      subset can be paired against reals at its own size instead of
+      training a detector to tell 512x512 from 1024x768. masks/ holds ten
+      files per id: the two inpainting masks at original size
+      (<id>_mask_bbox.png, <id>_mask_segm.png, mode L), the same two with a
+      soft border added (<id>_mask_<type>.png_ps_mask.png, mode RGB) which
+      is what was actually fed to the spliced pipelines, the two crop-size
+      copies of each (<id>_mask_<type>_512.png, <id>_mask_<type>_1024.png),
+      and <id>_mask_512.png / <id>_mask_1024.png, which record where the
+      crops sit inside the original and are NOT inpainting masks (nothing
+      pairs with them; masks/ matches no label glob, so they never become
+      entries either). Fakes are <id>_mask_<type>.png_<pipeline>_<0|1|2>
+      with pipeline-specific infixes -- sd2-512, sdxl-1024, ps (Photoshop
+      Firefly generative fill) and, for sd2-sp, sd2 after the bordered
+      mask's own name -- 2 mask types x 3 variations x 4 pipelines = 24
+      fakes per authentic image (3,124 -> 74,976).
+
+      Ground-truth pairing (this project's decision, encoded in
+      mask_rules): a fully-regenerated fake is paired with the mask at its
+      own geometry -- sd2-fr with <id>_mask_<type>_512.png (512x512), sdxl-fr
+      with <id>_mask_<type>_1024.png (the 1024-crop size) -- while a spliced
+      fake (sd2-sp, ps-sp) is paired with the bordered
+      <id>_mask_<type>.png_ps_mask.png rather than the plain
+      <id>_mask_<type>.png. The bordered mask is the one the inpainting
+      actually consumed, so the composited region on disk is the bordered
+      shape; scoring a localizer against the unbordered mask would count
+      that border, which really is manipulated pixels, as a false positive
+      on every single spliced image. Authentic images get no mask by
+      design (their ground truth is an empty mask).
+
+      Mask pixel values, measured on the extracted copy on 2026-09-21 (the
+      loader in imgforensics.eval.records converts to L and thresholds at
+      127, so all that matters is "white = manipulated, on black"):
+      134886_mask_bbox_512.png and 135673_mask_segm_512.png are mode L and
+      strictly two-valued, 0 and 255 (40,150 and 4,032 white px of 262,144)
+      -- no threshold ambiguity at all. 134886_mask_bbox.png_ps_mask.png
+      and 135673_mask_segm.png_ps_mask.png are mode RGB with R=G=B, 12 and
+      17 distinct levels, overwhelmingly 0 and 255 (743,400 black / 40,150
+      white of 786,432, and 693,989 / 4,061 of 699,392): the intermediate
+      levels are an anti-aliased rim about 3 px wide (2,882 and 1,342
+      partial pixels) around the white core, which is pixel-for-pixel the
+      plain <id>_mask_<type>.png. Thresholded at 127 the bordered mask
+      grows that core by 2.4% on the bbox file (IoU 0.977 with the plain
+      mask) and by 17% on the segm one (IoU 0.851), the segmentation
+      contour having far more perimeter per unit area. So RGB masks need
+      no special handling, and the only practical difference between the
+      bordered and plain masks is that rim -- which is exactly the pixels
+      the spliced pipelines repainted.
 
   - dataset: "ITW-SM"
     real_globs: ["0_real/**"]

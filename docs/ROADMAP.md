@@ -199,6 +199,15 @@ measured the same way from its first training run.
   [`docs/benchmarks/08_itwsm_summary.md`](benchmarks/08_itwsm_summary.md). With Synthbuster and
   ITW-SM measured, Phase 3's cross-dataset exit criterion is met; the per-year decay chart
   remains open.
+- **Laundering probe (2026-09-21):** before training a head on simulated social-media laundering
+  (experiment 04 as planned), two checks: laundering the held-out COCO photographs (downscale to
+  0.5-0.7, then JPEG q80) moves the experiment 03 head's false-positive rate only from 2.6% to at
+  most 8.9%, and on ITW-SM both heads call the *least* compressed, largest real photographs fake
+  most often (FPR 0.62 at JPEG quality 92 and above against 0.56 below 75). The head is reading
+  the content and source of in-the-wild photographs, not the platform's re-encoding, so the
+  experiment is not run and the next attempt on the real-class failure needs a genuine
+  in-the-wild real-image source in training. See
+  [`docs/benchmarks/09_exp04_laundering_probe_summary.md`](benchmarks/09_exp04_laundering_probe_summary.md).
 
 ### Phase 4 — Manipulation localization
 
@@ -269,6 +278,17 @@ measured the same way from its first training run.
   holds to q50, and comes apart under WEBP and sigma-5 noise; IML-ViT is flat at every level.
   See [`docs/benchmarks/05_cocoglide_ensemble_summary.md`](benchmarks/05_cocoglide_ensemble_summary.md).
   Phase 4a is complete; 4b (the trained inpainting localizer) is the open half.
+- **Result of the TGIF test (2026-09-21):** TGIF is on disk (65 GB, manual download through the
+  stable Nextcloud share; layout with regex mask pairing, 84,348-entry manifest, every fake paired
+  with the mask its pipeline used). On a 2,000-image stratified sample of the test split, the
+  released `catnet_v2` localizes the **spliced** inpaints almost perfectly -- pixel best-F1 0.926
+  (SD2) and 0.913 (Photoshop/Firefly), AP 0.96 / 0.95, image AUC 0.97 / 0.96 against the reals --
+  and finds almost nothing in the **fully regenerated** ones: best-F1 0.325 (SD2, 512 px) and
+  0.205 (SDXL, 1024 px) against a predict-everything baseline of 0.226 / 0.114, image AUC below
+  0.5. A composited inpaint is a splice; a regenerated image has no second source, which is the
+  gap 4b has to close. `iml_vit` stays near chance and the `max` ensemble loses to CAT-Net alone
+  on every subset. See
+  [`docs/benchmarks/09_tgif_localizers_summary.md`](benchmarks/09_tgif_localizers_summary.md).
 
 ### Phase 5 — Fusion and explanation
 

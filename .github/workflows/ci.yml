@@ -53,3 +53,10 @@ jobs:
 
       - name: Test (ml only)
         run: pytest -m ml
+
+      # The JPEG coefficient tests carry no `ml` marker, so `-m ml` skips
+      # them -- and this is the only job with jpeglib installed, so it is the
+      # only one that runs the libjpeg fast path and its equivalence checks
+      # at all. Without this step they are dead in CI.
+      - name: Test (JPEG coefficient decoder, both paths)
+        run: pytest tests/test_localization_jpegcoef.py -q

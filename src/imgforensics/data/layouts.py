@@ -25,10 +25,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
+from string import Formatter
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from imgforensics.data.audit import AuditReport, audit_manifest
 from imgforensics.data.manifest import (
@@ -44,6 +45,52 @@ GeneratorFrom = Literal["parent", "grandparent", "regex", "none"]
 SplitFrom = Literal["parent", "top", "regex", "none"]
 
 _SPLIT_VALUES = ("train", "val", "test")
+
+
+class MaskRule(BaseModel):
+    """One "derive a mask path from the image's own path" rule.
+
+    ``regex`` is applied with :func:`re.search` to the image's root-relative
+    POSIX path; on a match, its named groups are substituted into
+    ``template`` (a :meth:`str.format` template) to give the mask's
+    root-relative path. Validating the model checks that the regex compiles
+    and that ``template`` only names groups the regex declares, so a
+    misspelled group fails when ``layouts.yaml`` is loaded rather than
+    halfway through a manifest build. What validation cannot check is
+    whether a declared group actually *participates* in a given match (one
+    inside an alternation need not), and named groups that did not are
+    dropped before formatting -- so a template over an optional group
+    raises :class:`ValueError` from :func:`_mask_from_rules`, naming the
+    rule and the path, when such a match comes along.
+    """
+
+    regex: str
+    template: str
+
+    @field_validator("regex")
+    @classmethod
+    def _regex_must_compile(cls, value: str) -> str:
+        try:
+            re.compile(value)
+        except re.error as exc:
+            raise ValueError(f"invalid mask rule regex {value!r}: {exc}") from exc
+        return value
+
+    @model_validator(mode="after")
+    def _template_fields_must_be_group_names(self) -> MaskRule:
+        names = set(re.compile(self.regex).groupindex)
+        fields = {
+            field_name.split(".")[0].split("[")[0]
+            for _, field_name, _, _ in Formatter().parse(self.template)
+            if field_name
+        }
+        unknown = sorted(fields - names)
+        if unknown:
+            raise ValueError(
+                f"mask rule template {self.template!r} references {unknown}, "
+                f"which the regex has no named group for (has: {sorted(names)})"
+            )
+        return self
 
 
 class Layout(BaseModel):
@@ -78,6 +125,23 @@ class Layout(BaseModel):
     image's own folder, ``"{parent}/../gt/{stem}_gt.png"``. A template that
     resolves to a nonexistent file yields ``mask_path=None`` rather than an
     error.
+
+    ``mask_rules``, when non-empty, replaces ``mask_template`` (both may be
+    declared; the rules win) for datasets whose mask name cannot be written
+    as one template over the image's stem -- e.g. TGIF, where the same
+    inpainting mask is stored at several sizes and which one is the ground
+    truth depends on which pipeline produced the fake. Each
+    :class:`MaskRule` is tried in order and the first whose ``regex``
+    matches wins; a file matching no rule, like a template resolving to a
+    nonexistent file, yields ``mask_path=None`` rather than an error.
+
+    ``extra_regex``, when set, is applied with :func:`re.search` to the
+    root-relative POSIX path and the named groups of its match are stored
+    (as strings) in the entry's ``extra`` -- groups that did not participate
+    are omitted, and no match yields an empty ``extra``. It is meant for
+    per-file facts a dataset encodes in its file names and that no other
+    field has room for, such as which crop of the authentic image an entry
+    is.
     """
 
     dataset: str
@@ -89,8 +153,21 @@ class Layout(BaseModel):
     split_regex: str | None = None
     split_map: dict[str, str] = Field(default_factory=dict)
     mask_template: str | None = None
+    mask_rules: list[MaskRule] = Field(default_factory=list)
+    extra_regex: str | None = None
     exclude_globs: list[str] = Field(default_factory=list)
     notes: str | None = None
+
+    @field_validator("extra_regex")
+    @classmethod
+    def _extra_regex_must_compile(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            re.compile(value)
+        except re.error as exc:
+            raise ValueError(f"invalid extra_regex {value!r}: {exc}") from exc
+        return value
 
 
 def load_layouts() -> list[Layout]:
@@ -186,16 +263,58 @@ def _split_of(rel_posix: str, layout: Layout) -> Split | None:
     return None
 
 
+def _mask_from_rules(rel_posix: str, layout: Layout) -> str | None:
+    """The root-relative mask path the first matching :class:`MaskRule` gives, if any.
+
+    Raises:
+        ValueError: the matching rule's template could not be filled in --
+            it names a group that is declared but did not participate in
+            *this* match (e.g. one inside an alternation), or a positional
+            ``{}`` field. Both are rule bugs that :class:`MaskRule`'s
+            validation cannot see, so they are reported with the rule and
+            the offending path rather than as a bare ``KeyError``.
+    """
+    for rule in layout.mask_rules:
+        match = re.search(rule.regex, rel_posix)
+        if match is None:
+            continue
+        groups = {name: value for name, value in match.groupdict().items() if value is not None}
+        try:
+            return rule.template.format(**groups)
+        except (KeyError, IndexError) as exc:
+            raise ValueError(
+                f"mask rule {rule.regex!r} matched {rel_posix!r}, but its template "
+                f"{rule.template!r} could not be filled in ({exc!r}); the groups that "
+                f"took part were {sorted(groups)}"
+            ) from exc
+    return None
+
+
 def _mask_of(file_path: Path, root: Path, layout: Layout) -> Path | None:
-    if not layout.mask_template:
-        return None
     rel = file_path.resolve().relative_to(root.resolve())
-    stem = rel.stem
-    name = rel.name
-    parent = rel.parent.as_posix()
-    candidate_str = layout.mask_template.format(stem=stem, name=name, parent=parent)
+    candidate_str: str | None
+    if layout.mask_rules:
+        candidate_str = _mask_from_rules(rel.as_posix(), layout)
+    elif layout.mask_template:
+        candidate_str = layout.mask_template.format(
+            stem=rel.stem, name=rel.name, parent=rel.parent.as_posix()
+        )
+    else:
+        candidate_str = None
+    if candidate_str is None:
+        return None
     candidate = (root / candidate_str).resolve()
     return candidate if candidate.is_file() else None
+
+
+def _extra_of(rel_posix: str, layout: Layout) -> dict[str, str]:
+    """The named groups ``extra_regex`` matches on ``rel_posix`` (empty when it does not)."""
+    if not layout.extra_regex:
+        return {}
+    match = re.search(layout.extra_regex, rel_posix)
+    if match is None:
+        return {}
+    return {name: value for name, value in match.groupdict().items() if value is not None}
 
 
 def _callables_from_layout(
@@ -205,6 +324,7 @@ def _callables_from_layout(
     Callable[[Path], str | None],
     Callable[[Path], Split | None],
     Callable[[Path], Path | None],
+    Callable[[Path], dict[str, str]],
 ]:
     real_re = _compile_all(layout.real_globs)
     fake_re = _compile_all(layout.fake_globs)
@@ -229,7 +349,10 @@ def _callables_from_layout(
     def mask_of(path: Path) -> Path | None:
         return _mask_of(path, root, layout)
 
-    return label_of, generator_of, split_of, mask_of
+    def extra_of(path: Path) -> dict[str, str]:
+        return _extra_of(_relative_posix(path, root), layout)
+
+    return label_of, generator_of, split_of, mask_of, extra_of
 
 
 def _generators_only_for_fakes(
@@ -298,9 +421,11 @@ def prepare(
             resolved_commercial_ok = info.commercial_ok
 
     root = Path(src_root).resolve()
+    layout: Layout | None
     try:
         layout = get_layout(dataset)
     except KeyError:
+        layout = None
         print(
             f"[prepare] no layout registered for {dataset!r}; "
             "falling back to label_from_parent_folder"
@@ -309,8 +434,9 @@ def prepare(
         generator_of: Callable[[Path], str | None] | None = None
         split_of: Callable[[Path], Split | None] | None = None
         mask_of: Callable[[Path], Path | None] | None = None
+        extra_of: Callable[[Path], dict[str, str]] | None = None
     else:
-        label_of, generator_of, split_of, mask_of = _callables_from_layout(layout, root)
+        label_of, generator_of, split_of, mask_of, extra_of = _callables_from_layout(layout, root)
 
     attributes = _load_attributes(root)
     if attributes:
@@ -324,14 +450,45 @@ def prepare(
         generator_of=generator_of,
         split_of=split_of,
         mask_of=mask_of,
+        extra_of=extra_of,
         license=resolved_license,
         commercial_ok=resolved_commercial_ok,
         progress=False,
     )
 
+    if layout is not None and layout.mask_rules:
+        _print_mask_rule_coverage(manifest, layout)
+
     manifest.save(out_path)
     report = audit_manifest(manifest, strict=False)
     return manifest, skipped, report
+
+
+def _print_mask_rule_coverage(manifest: Manifest, layout: Layout) -> None:
+    """Print how many fakes a ``mask_rules`` layout left without a mask, and why.
+
+    A fake without a mask is never an error -- but on a dataset whose masks
+    are wired by regex it is almost always a typo in a rule or an
+    incompletely extracted archive, and a manifest that silently carries
+    ``mask_path=None`` everywhere would only show up much later as missing
+    pixel metrics. Splitting the count into "no rule matched" and "rule
+    matched but the mask file is not there" tells those two apart.
+    """
+    fakes = no_rule = no_file = 0
+    for entry in manifest.entries:
+        if entry.label != "fake":
+            continue
+        fakes += 1
+        if entry.mask_path is not None:
+            continue
+        if _mask_from_rules(entry.path, layout) is None:
+            no_rule += 1
+        else:
+            no_file += 1
+    print(
+        f"[prepare] mask rules: {fakes - no_rule - no_file}/{fakes} fake(s) paired with a mask "
+        f"({no_rule} matched no rule, {no_file} had no mask file on disk)"
+    )
 
 
 #: Name of the sidecar file :func:`materialize_parquet` writes next to the

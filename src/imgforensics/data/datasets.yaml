@@ -424,11 +424,11 @@ datasets:
   - name: "TGIF"
     task: "localization"
     homepage: "https://github.com/IDLabMedia/tgif-dataset"
-    download: "https://zenodo.org/records/14050608"
+    download: "https://github.com/IDLabMedia/tgif-dataset#download"
     access: "open"
     license: "CC BY-SA 4.0 (COCO-derived)"
     commercial_ok: true
-    approx_size_gb: null
+    approx_size_gb: 65.4
     images: "3,124 authentic (2,440/341/343 train-val-test) -> 74,976 fakes (58,560/8,184/8,232 train-val-test)"
     generators: "SD2, SDXL, Adobe Firefly inpainting (composited and fully-regenerated variants)"
     masks: true
@@ -436,9 +436,14 @@ datasets:
     notes: >-
       A generative-edit dataset with masks and train/val/test splits. The
       CC BY-SA ShareAlike clause means any derived image set built from it
-      must carry the same license if redistributed.
+      must carry the same license if redistributed. `download` points at
+      the README's download section rather than at Zenodo record 14050608,
+      which was listed here until 2026-09-21 but holds only the WIFS paper
+      (a single 345.9 kB PDF, CC BY 4.0) and no images -- the images live
+      on the imec Nextcloud share that section links to, 65.4 GB in six
+      per-folder zips (see acquire.yaml).
     verified: true
-    verified_on: "2026-09-09"
+    verified_on: "2026-09-21"
 
   - name: "TGIF2"
     task: "localization"

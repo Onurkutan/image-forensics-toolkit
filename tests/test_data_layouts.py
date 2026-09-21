@@ -7,10 +7,12 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
+from pydantic import ValidationError
 
 from imgforensics.data.audit import AuditReport
 from imgforensics.data.layouts import (
     Layout,
+    MaskRule,
     get_layout,
     load_layouts,
     materialize_parquet,
@@ -245,7 +247,7 @@ def test_layout_mask_template_missing_file_returns_none(tmp_path: Path) -> None:
 
     from imgforensics.data.layouts import _callables_from_layout
 
-    *_rest, mask_of = _callables_from_layout(layout, root)
+    _, _, _, mask_of, _ = _callables_from_layout(layout, root)
     assert mask_of(root / "fake" / "a.png") is None
 
     (root / "masks").mkdir()
@@ -265,7 +267,7 @@ def test_layout_generator_from_regex(tmp_path: Path) -> None:
 
     from imgforensics.data.layouts import _callables_from_layout
 
-    _, generator_of, _, _ = _callables_from_layout(layout, root)
+    _, generator_of, _, _, _ = _callables_from_layout(layout, root)
     assert generator_of(root / "sdxl" / "training" / "a.png") == "sdxl"
 
 
@@ -282,7 +284,7 @@ def test_layout_split_from_regex_with_split_map(tmp_path: Path) -> None:
 
     from imgforensics.data.layouts import _callables_from_layout
 
-    _, _, split_of, _ = _callables_from_layout(layout, root)
+    _, _, split_of, _, _ = _callables_from_layout(layout, root)
     assert split_of(root / "sdxl" / "training" / "a.png") == "train"
 
 
@@ -568,3 +570,320 @@ def test_layout_adapter_reads_itwsm_platform_from_fake_file_names(tmp_path: Path
     assert {entry.generator for entry in fakes} == {"facebook", "instagram"}
     # Reals never carry a generator, whatever their file name says.
     assert {entry.generator for entry in reals} == {None}
+
+
+# --- synthetic TGIF-style tree (mask_rules + extra_regex) ------------------
+
+_TGIF_SPLITS = ("training", "validation", "testing")
+# One COCO category name with a space in it, which the layout's regexes must survive.
+_TGIF_CATEGORIES = ("airplane", "hair drier")
+_TGIF_IDS = ("134886", "135673")
+_TGIF_MASK_TYPES = ("bbox", "segm")
+_TGIF_VARIATIONS = (0, 1, 2)
+
+# Stand-ins for the real geometries: the full-size original, the 1024-pipeline
+# crop, and the 512x512 SD2 crop.
+_TGIF_FULL = (64, 48)
+_TGIF_1024 = (60, 44)
+_TGIF_512 = (32, 32)
+
+
+def _make_tgif_like_tree(root: Path) -> None:
+    """The real TGIF naming in miniature: six folders, three splits, ten masks per id."""
+    for split in _TGIF_SPLITS:
+        for category in _TGIF_CATEGORIES:
+            for image_id in _TGIF_IDS:
+                orig = root / "orig" / split / category
+                _img(orig / f"{image_id}_orig.png", _TGIF_FULL)
+                _img(orig / f"{image_id}_orig_1024.png", _TGIF_1024)
+                _img(orig / f"{image_id}_orig_512.png", _TGIF_512)
+
+                sd2_fr = root / "sd2-fr" / split / category
+                sdxl_fr = root / "sdxl-fr" / split / category
+                sd2_sp = root / "sd2-sp" / split / category
+                ps_sp = root / "ps-sp" / split / category
+
+                masks = root / "masks" / split / category
+                # Where the two crops sit inside the original; not inpainting masks.
+                _img(masks / f"{image_id}_mask_512.png", _TGIF_FULL)
+                _img(masks / f"{image_id}_mask_1024.png", _TGIF_FULL)
+                for mask_type in _TGIF_MASK_TYPES:
+                    _img(masks / f"{image_id}_mask_{mask_type}.png", _TGIF_FULL)
+                    _img(masks / f"{image_id}_mask_{mask_type}.png_ps_mask.png", _TGIF_FULL)
+                    _img(masks / f"{image_id}_mask_{mask_type}_512.png", _TGIF_512)
+                    _img(masks / f"{image_id}_mask_{mask_type}_1024.png", _TGIF_1024)
+
+                    stem = f"{image_id}_mask_{mask_type}.png"
+                    for variation in _TGIF_VARIATIONS:
+                        _img(sd2_fr / f"{stem}_sd2-512_{variation}.png", _TGIF_512)
+                        _img(sdxl_fr / f"{stem}_sdxl-1024_{variation}.png", _TGIF_1024)
+                        _img(sd2_sp / f"{stem}_ps_mask.png_sd2_{variation}.png", _TGIF_FULL)
+                        _img(ps_sp / f"{stem}_ps_{variation}.png", _TGIF_FULL)
+
+
+def test_tgif_layout_labels_generators_and_splits(tmp_path: Path) -> None:
+    _make_tgif_like_tree(tmp_path)
+    manifest, skipped, report = prepare("TGIF", tmp_path, tmp_path / "out" / "manifest.jsonl")
+
+    assert skipped == []
+    units = len(_TGIF_SPLITS) * len(_TGIF_CATEGORIES) * len(_TGIF_IDS)
+    reals = [entry for entry in manifest.entries if entry.label == "real"]
+    fakes = [entry for entry in manifest.entries if entry.label == "fake"]
+    # 3 orig variants and 4 x 2 x 3 = 24 fakes per authentic image; masks/ is
+    # matched by neither glob and never becomes an entry.
+    assert len(reals) == 3 * units
+    assert len(fakes) == 24 * units
+    assert len(manifest.entries) == 27 * units
+
+    assert {entry.generator for entry in fakes} == {"sd2-fr", "sdxl-fr", "sd2-sp", "ps-sp"}
+    assert {entry.generator for entry in reals} == {None}
+    counts = manifest.summary()
+    assert counts["split"] == {"train": 9 * units, "val": 9 * units, "test": 9 * units}
+    assert isinstance(report, AuditReport)
+
+
+def test_tgif_layout_pairs_each_fake_subset_with_its_own_mask(tmp_path: Path) -> None:
+    """Each pipeline's ground truth is the mask at that pipeline's own geometry.
+
+    Getting this wrong is silent: a 512x512 fake scored against the full-size
+    mask, or a spliced fake scored against the unbordered mask, still produces
+    pixel metrics -- just meaningless ones.
+    """
+    _make_tgif_like_tree(tmp_path)
+    manifest, _, _ = prepare("TGIF", tmp_path, tmp_path / "out" / "manifest.jsonl")
+    by_path = {entry.path: entry for entry in manifest.entries}
+
+    prefix = "testing/hair drier"
+    assert (
+        by_path[f"sd2-fr/{prefix}/134886_mask_bbox.png_sd2-512_0.png"].mask_path
+        == f"masks/{prefix}/134886_mask_bbox_512.png"
+    )
+    assert (
+        by_path[f"sdxl-fr/{prefix}/134886_mask_segm.png_sdxl-1024_2.png"].mask_path
+        == f"masks/{prefix}/134886_mask_segm_1024.png"
+    )
+    # Spliced fakes pair with the bordered mask that was fed to the inpainter.
+    assert (
+        by_path[f"sd2-sp/{prefix}/135673_mask_bbox.png_ps_mask.png_sd2_1.png"].mask_path
+        == f"masks/{prefix}/135673_mask_bbox.png_ps_mask.png"
+    )
+    assert (
+        by_path[f"ps-sp/{prefix}/135673_mask_segm.png_ps_1.png"].mask_path
+        == f"masks/{prefix}/135673_mask_segm.png_ps_mask.png"
+    )
+
+    # Every fake in the tree is paired, and no authentic image ever is.
+    assert all(entry.mask_path is not None for entry in manifest.entries if entry.label == "fake")
+    assert all(entry.mask_path is None for entry in manifest.entries if entry.label == "real")
+
+    # The paired mask is the one at the image's own geometry.
+    for entry in manifest.entries:
+        if entry.mask_path is None:
+            continue
+        with Image.open(tmp_path / entry.mask_path) as mask:
+            assert mask.size == (entry.width, entry.height), entry.path
+
+
+def test_tgif_layout_records_variant_and_mask_type_in_extra(tmp_path: Path) -> None:
+    _make_tgif_like_tree(tmp_path)
+    manifest, _, _ = prepare("TGIF", tmp_path, tmp_path / "out" / "manifest.jsonl")
+    by_path = {entry.path: entry for entry in manifest.entries}
+
+    prefix = "training/airplane"
+    assert by_path[f"orig/{prefix}/134886_orig.png"].extra == {"variant": "orig"}
+    assert by_path[f"orig/{prefix}/134886_orig_512.png"].extra == {"variant": "orig_512"}
+    assert by_path[f"orig/{prefix}/134886_orig_1024.png"].extra == {"variant": "orig_1024"}
+
+    assert by_path[f"sd2-fr/{prefix}/134886_mask_bbox.png_sd2-512_0.png"].extra == {
+        "mask_type": "bbox",
+        "variation": "0",
+    }
+    assert by_path[f"ps-sp/{prefix}/135673_mask_segm.png_ps_2.png"].extra == {
+        "mask_type": "segm",
+        "variation": "2",
+    }
+    assert by_path[f"sd2-sp/{prefix}/135673_mask_bbox.png_ps_mask.png_sd2_1.png"].extra == {
+        "mask_type": "bbox",
+        "variation": "1",
+    }
+    assert by_path[f"sdxl-fr/{prefix}/134886_mask_segm.png_sdxl-1024_2.png"].extra == {
+        "mask_type": "segm",
+        "variation": "2",
+    }
+    # Every entry carries one group set or the other, never both, never neither.
+    for entry in manifest.entries:
+        expected = {"variant"} if entry.label == "real" else {"mask_type", "variation"}
+        assert set(entry.extra) == expected, entry.path
+
+
+def test_tgif_layout_counts_fakes_left_without_a_mask(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unpaired fake is never an error, but it must never be silent either."""
+    _make_tgif_like_tree(tmp_path)
+    # A mask that did not come out of the archive: the rule matches, the file is gone.
+    (tmp_path / "masks/testing/airplane/134886_mask_bbox_512.png").unlink()
+    # A file no rule knows how to read: still a fake, just an unpaired one.
+    _img(tmp_path / "sd2-fr/testing/airplane/134886_mask_bbox.png_sd2-512_99b.png", _TGIF_512)
+
+    manifest, _, _ = prepare("TGIF", tmp_path, tmp_path / "out" / "manifest.jsonl")
+    by_path = {entry.path: entry for entry in manifest.entries}
+
+    missing_file = by_path["sd2-fr/testing/airplane/134886_mask_bbox.png_sd2-512_0.png"]
+    assert missing_file.label == "fake"
+    assert missing_file.mask_path is None
+    unmatched = by_path["sd2-fr/testing/airplane/134886_mask_bbox.png_sd2-512_99b.png"]
+    assert unmatched.label == "fake"
+    assert unmatched.mask_path is None
+    assert unmatched.extra == {}  # extra_regex does not match it either
+
+    out = capsys.readouterr().out
+    assert "1 matched no rule" in out
+    assert "3 had no mask file on disk" in out  # the deleted mask served 3 variations
+
+
+def test_tgif_layout_entry_keeps_the_folder_names_the_share_serves() -> None:
+    layout = get_layout("TGIF")
+    assert layout.real_globs == ["orig/**"]
+    assert layout.fake_globs == ["sd2-sp/**", "ps-sp/**", "sd2-fr/**", "sdxl-fr/**"]
+    assert len(layout.mask_rules) == 4
+    assert layout.mask_template is None
+    assert layout.extra_regex is not None
+
+
+# --- Layout.mask_rules / extra_regex internals -----------------------------
+
+
+def test_mask_rules_take_precedence_over_mask_template(tmp_path: Path) -> None:
+    layout = Layout(
+        dataset="unit-test",
+        fake_globs=["fake/**"],
+        mask_template="masks/{stem}.png",
+        mask_rules=[MaskRule(regex=r"^fake/(?P<stem>[^/]+)\.png$", template="gt/{stem}_gt.png")],
+    )
+    _img(tmp_path / "fake" / "a.png")
+    _img(tmp_path / "masks" / "a.png")
+    _img(tmp_path / "gt" / "a_gt.png")
+
+    from imgforensics.data.layouts import _callables_from_layout
+
+    _, _, _, mask_of, _ = _callables_from_layout(layout, tmp_path)
+    assert mask_of(tmp_path / "fake" / "a.png") == (tmp_path / "gt" / "a_gt.png").resolve()
+
+
+def test_mask_rules_are_tried_in_order_and_first_match_wins(tmp_path: Path) -> None:
+    layout = Layout(
+        dataset="unit-test",
+        fake_globs=["fake/**"],
+        mask_rules=[
+            MaskRule(regex=r"^fake/(?P<stem>[^/]+)_sp\.png$", template="gt/{stem}_sp_gt.png"),
+            MaskRule(regex=r"^fake/(?P<stem>[^/]+)\.png$", template="gt/{stem}_gt.png"),
+        ],
+    )
+
+    from imgforensics.data.layouts import _mask_from_rules
+
+    assert _mask_from_rules("fake/a_sp.png", layout) == "gt/a_sp_gt.png"
+    assert _mask_from_rules("fake/b.png", layout) == "gt/b_gt.png"
+    assert _mask_from_rules("real/b.png", layout) is None
+
+
+def test_layout_without_mask_rules_still_uses_mask_template(tmp_path: Path) -> None:
+    """Every other packaged layout must behave exactly as it did before mask_rules."""
+    for packaged in load_layouts():
+        if packaged.dataset != "TGIF":
+            assert packaged.mask_rules == []
+            assert packaged.extra_regex is None
+
+    layout = Layout(dataset="unit-test", fake_globs=["fake/**"], mask_template="masks/{stem}.png")
+    _img(tmp_path / "fake" / "a.png")
+    _img(tmp_path / "masks" / "a.png")
+
+    from imgforensics.data.layouts import _callables_from_layout
+
+    _, _, _, mask_of, extra_of = _callables_from_layout(layout, tmp_path)
+    assert mask_of(tmp_path / "fake" / "a.png") == (tmp_path / "masks" / "a.png").resolve()
+    assert extra_of(tmp_path / "fake" / "a.png") == {}
+
+
+def test_mask_rule_rejects_an_uncompilable_regex() -> None:
+    with pytest.raises(ValidationError, match="invalid mask rule regex"):
+        MaskRule(regex=r"^fake/(?P<stem>[^/]+\.png$", template="gt/{stem}.png")
+
+
+def test_mask_rule_rejects_a_template_field_the_regex_has_no_group_for() -> None:
+    with pytest.raises(ValidationError, match="no named group"):
+        MaskRule(regex=r"^fake/(?P<stem>[^/]+)\.png$", template="gt/{split}/{stem}.png")
+
+
+def test_layout_rejects_an_uncompilable_extra_regex() -> None:
+    with pytest.raises(ValidationError, match="invalid extra_regex"):
+        Layout(dataset="unit-test", fake_globs=["fake/**"], extra_regex=r"(?P<oops>")
+
+
+def test_extra_regex_omits_groups_that_did_not_participate() -> None:
+    layout = Layout(
+        dataset="unit-test",
+        real_globs=["real/**"],
+        fake_globs=["fake/**"],
+        extra_regex=r"^(?:real/(?P<variant>[a-z]+)|fake/(?P<generator>[a-z]+))_\d+\.png$",
+    )
+
+    from imgforensics.data.layouts import _extra_of
+
+    assert _extra_of("real/orig_1.png", layout) == {"variant": "orig"}
+    assert _extra_of("fake/sdxl_1.png", layout) == {"generator": "sdxl"}
+    assert _extra_of("other/x_1.png", layout) == {}
+
+
+def test_tgif_layout_reports_full_mask_coverage_on_a_complete_tree(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The happy-path form of the coverage line: nothing unpaired, and it still says so."""
+    _make_tgif_like_tree(tmp_path)
+    manifest, _, _ = prepare("TGIF", tmp_path, tmp_path / "out" / "manifest.jsonl")
+
+    fakes = sum(1 for entry in manifest.entries if entry.label == "fake")
+    out = capsys.readouterr().out
+    assert (
+        f"mask rules: {fakes}/{fakes} fake(s) paired with a mask "
+        "(0 matched no rule, 0 had no mask file on disk)"
+    ) in out
+
+
+def test_mask_rule_template_over_a_group_that_did_not_participate_raises() -> None:
+    """A template naming a declared-but-optional group fails with the rule and the path.
+
+    Validation cannot catch this one -- the group exists, it simply does not
+    take part in every match -- so the failure has to carry enough context to
+    find the offending rule instead of surfacing as a bare KeyError.
+    """
+    layout = Layout(
+        dataset="unit-test",
+        fake_globs=["fake/**"],
+        mask_rules=[
+            MaskRule(
+                regex=r"^fake/(?:(?P<a>alpha)|beta)_(?P<id>\d+)\.png$",
+                template="gt/{a}_{id}.png",
+            )
+        ],
+    )
+
+    from imgforensics.data.layouts import _mask_from_rules
+
+    assert _mask_from_rules("fake/alpha_7.png", layout) == "gt/alpha_7.png"
+    with pytest.raises(ValueError, match="could not be filled in"):
+        _mask_from_rules("fake/beta_7.png", layout)
+
+
+def test_mask_rule_template_with_a_positional_field_raises() -> None:
+    layout = Layout(
+        dataset="unit-test",
+        fake_globs=["fake/**"],
+        mask_rules=[MaskRule(regex=r"^fake/(?P<id>\d+)\.png$", template="gt/{}.png")],
+    )
+
+    from imgforensics.data.layouts import _mask_from_rules
+
+    with pytest.raises(ValueError, match="could not be filled in"):
+        _mask_from_rules("fake/7.png", layout)
