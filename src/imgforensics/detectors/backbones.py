@@ -144,7 +144,9 @@ def _apply_weights_dir_env() -> Path | None:
     return directory
 
 
-def load_backbone(spec: BackboneSpec, device: str = "auto") -> torch.nn.Module:
+def load_backbone(
+    spec: BackboneSpec, device: str = "auto", dynamic_img_size: bool = False
+) -> torch.nn.Module:
     """Load ``spec``'s pretrained weights as a frozen, eval-mode model on ``device``.
 
     The classifier head is dropped (``num_classes=0``), every parameter has
@@ -159,6 +161,15 @@ def load_backbone(spec: BackboneSpec, device: str = "auto") -> torch.nn.Module:
     to 518 px and asserts on any other input size: at 224 px its patch-14
     grid is 16x16, which is the resolution the crop policy feeds it.
 
+    ``dynamic_img_size`` builds a model that interpolates its position
+    embeddings per forward pass instead of asserting on the one size it was
+    built at, so a single loaded backbone can be fed crops of several
+    resolutions. It is off by default and the keyword is not passed to timm
+    at all in that case, so every existing caller builds byte-identically to
+    before; :mod:`imgforensics.localization.dino_inpaint` is the one caller
+    that needs it, running the same weights at 448 px on training crops and
+    at whatever whole-patch size a small image pads up to.
+
     Mixed precision is *not* baked into the weights here -- the model stays
     float32 and :func:`extract` runs it under ``torch.autocast`` on CUDA, so
     the same loaded model works on both CPU and GPU.
@@ -168,8 +179,9 @@ def load_backbone(spec: BackboneSpec, device: str = "auto") -> torch.nn.Module:
     import timm
     import torch
 
+    extra: dict[str, Any] = {"dynamic_img_size": True} if dynamic_img_size else {}
     model = timm.create_model(
-        spec.timm_id, pretrained=True, num_classes=0, img_size=spec.input_size
+        spec.timm_id, pretrained=True, num_classes=0, img_size=spec.input_size, **extra
     )
     model.eval()
     model.requires_grad_(False)

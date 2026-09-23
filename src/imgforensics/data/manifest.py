@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import math
 import random
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path, PurePosixPath
@@ -391,6 +391,114 @@ def sample(
 
 def _combine_notes(existing: str | None, addition: str) -> str:
     return f"{existing}; {addition}" if existing else addition
+
+
+def _matches_extra(entry: ManifestEntry, extra: Mapping[str, Sequence[str]]) -> bool:
+    """Whether ``entry.extra`` satisfies every requested key.
+
+    A key is satisfied when the entry carries it and its value -- compared as
+    a string, since ``extra`` is free-form and a manifest built from a regex
+    stores everything as text -- is one of the values listed for that key. The
+    keys are ANDed and each key's values are ORed, which is the only reading
+    that lets ``--extra variant=orig_512 --extra variant=orig_1024`` mean "one
+    of the two authentic sizes" while ``--extra mask_type=segm --extra
+    variation=0`` means "a segmentation mask *and* the first variation".
+    """
+    for key, values in extra.items():
+        if key not in entry.extra or str(entry.extra[key]) not in values:
+            return False
+    return True
+
+
+def filter_entries(
+    manifest: Manifest,
+    *,
+    split: Split | None = None,
+    label: Label | None = None,
+    generators: Sequence[str] | None = None,
+    extra: Mapping[str, Sequence[str]] | None = None,
+    require_mask: bool | None = None,
+    dedupe_sha256: bool = False,
+) -> Manifest:
+    """Narrow a manifest to the entries a training run actually wants.
+
+    Every criterion is optional and they are ANDed; ``generators`` and each
+    key of ``extra`` are ORed within themselves (see :func:`_matches_extra`).
+    This is what turns one big dataset manifest into the slices a run plan
+    names -- "the train split's fully-regenerated fakes, mask required", "the
+    train split's 512 and 1024 px authentic variants" -- without a throwaway
+    script per slice, and it records what it did in ``meta.notes`` so the
+    resulting file says how it was made.
+
+    ``dedupe_sha256`` keeps the first entry of each distinct image, in
+    path-sorted order, which matters for a dataset that files the same file
+    under several names. In TGIF's train split that is the category folders,
+    not the size variants: no stem appears under both ``orig_512`` and
+    ``orig_1024``, but a photograph belonging to several COCO categories is
+    stored once per category, so its 4,880 sized authentic images are 4,140
+    distinct files and training on the manifest as it stands would weight the
+    multi-category photographs more heavily than the rest.
+
+    Args:
+        manifest: Source manifest; its ``meta`` is carried over untouched
+            apart from the appended note.
+        split: Keep only entries of this split.
+        label: Keep only entries with this label.
+        generators: Keep only entries whose ``generator`` is one of these.
+        extra: ``{key: accepted values}`` over the entries' ``extra`` dict.
+        require_mask: ``True`` keeps only entries that have a ``mask_path``,
+            ``False`` only entries that have none, ``None`` (the default)
+            ignores the field.
+        dedupe_sha256: Drop entries whose ``sha256`` was already seen.
+
+    Returns:
+        A new :class:`Manifest` holding the selected entries.
+    """
+    selected: list[ManifestEntry] = []
+    for entry in sorted(manifest.entries, key=lambda item: item.path):
+        if split is not None and entry.split != split:
+            continue
+        if label is not None and entry.label != label:
+            continue
+        if generators is not None and entry.generator not in set(generators):
+            continue
+        if extra is not None and not _matches_extra(entry, extra):
+            continue
+        if require_mask is not None and (entry.mask_path is not None) != require_mask:
+            continue
+        selected.append(entry)
+
+    if dedupe_sha256:
+        seen: set[str] = set()
+        deduped: list[ManifestEntry] = []
+        for entry in selected:
+            if entry.sha256 in seen:
+                continue
+            seen.add(entry.sha256)
+            deduped.append(entry)
+        selected = deduped
+
+    criteria: list[str] = []
+    if split is not None:
+        criteria.append(f"split={split}")
+    if label is not None:
+        criteria.append(f"label={label}")
+    if generators is not None:
+        criteria.append(f"generator in {sorted(generators)}")
+    if extra is not None:
+        for key in sorted(extra):
+            criteria.append(f"extra.{key} in {sorted(extra[key])}")
+    if require_mask is not None:
+        criteria.append("mask required" if require_mask else "no mask")
+    if dedupe_sha256:
+        criteria.append("deduped by sha256")
+
+    note = (
+        f"filtered {len(selected)} of {len(manifest.entries)} entries "
+        f"({', '.join(criteria) or 'no criteria'})"
+    )
+    new_meta = manifest.meta.model_copy(update={"notes": _combine_notes(manifest.meta.notes, note)})
+    return Manifest(meta=new_meta, entries=selected)
 
 
 def split_by_group(

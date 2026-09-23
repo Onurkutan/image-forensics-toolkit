@@ -1,0 +1,77 @@
+# Phase 4b, stage 2: the same head, with LoRA adapters on the backbone's
+# attention projections (imgforensics.localization.train_inpaint).
+#
+#   imgforensics train localizer --config configs/experiments/4b_dino_inpaint_stage2_lora.yaml
+#
+# Run this only if stage 1 lands in the partial band -- a frozen DINOv2 may
+# simply not encode the difference between a decoder's texture and a sensor's,
+# in which case no head over it can find one. Stage 2 is the cheapest test of
+# that: a rank-8 update on every block's fused attn.qkv is 294,912 trainable
+# parameters against the backbone's 86 M, the base weights stay frozen, and
+# the saved file gains only the A/B factors (a few hundred kilobytes) because
+# it never contained the base weights in the first place.
+#
+# Measured on this project's 6 GB card at 448 px with gradients through all
+# twelve attn.qkv: batch 4 runs at 13.7 crops/s in 1.56 GB, batch 8 with
+# gradient checkpointing at 10.4 crops/s in 1.01 GB. Batch 4 without
+# checkpointing is therefore the default here; turn grad_checkpointing on only
+# if you raise batch_size above 4.
+#
+# The head is warm-started from stage 1 rather than reinitialised, so the
+# adapters start from a model that already predicts something and the two
+# stages' numbers are comparable.
+
+train_fake_manifest: data/manifests/tgif_train_fr.jsonl
+train_real_manifest: data/manifests/tgif_train_real.jsonl
+val_manifest: data/manifests/tgif_val_fr_500.jsonl
+
+model:
+  backbone: dinov2_vitb14
+  layers: [5, 8, 11]
+  crop_size: 448
+  stride: 336
+  patch: 14
+  head:
+    dim: 768
+    proj_dim: 256
+    context_kernel: 3
+
+patch_target: soft
+
+sampling:
+  real: 0.30
+  sd2-fr: 0.35
+  sdxl-fr: 0.35
+
+positive_crop_fraction: 0.5
+
+augment: configs/augment_inpaint.yaml
+flip_probability: 0.5
+
+pos_weight: 3.0
+dice_weight: 0.5
+
+epochs: 12
+crops_per_epoch: 12000
+batch_size: 4
+# The head is already fitted; the adapters want the smaller step.
+lr: 0.0003
+lora_lr: 0.0001
+weight_decay: 0.01
+early_stopping_patience: 4
+num_workers: 4
+seed: 0
+
+lora:
+  rank: 8
+  alpha: 16.0
+  dropout: 0.05
+
+# Only worth turning on above batch_size 4; it costs about a third of the
+# throughput to buy back half a gigabyte.
+grad_checkpointing: false
+
+warm_start: weights/dino_inpaint
+
+out_dir: weights/dino_inpaint_lora
+device: auto

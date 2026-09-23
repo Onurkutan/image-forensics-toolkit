@@ -17,6 +17,7 @@ from imgforensics.data.manifest import (
     ManifestMeta,
     build_manifest,
     crop_entries,
+    filter_entries,
     label_from_parent_folder,
     merge,
     sample,
@@ -406,6 +407,146 @@ def test_merge_result_round_trips_through_save_load(tmp_path: Path) -> None:
     merged.save(out_path)
     loaded = Manifest.load(out_path)
     assert len(loaded.entries) == 2
+
+
+# --- filter_entries() --------------------------------------------------------
+
+
+def _sliceable_manifest() -> Manifest:
+    """A TGIF-shaped manifest: two splits, two fake generators, sized real variants."""
+    entries: list[ManifestEntry] = []
+    counter = 0
+    for split in ("train", "val"):
+        for index in range(4):
+            for variant in ("orig", "orig_512", "orig_1024"):
+                counter += 1
+                entries.append(
+                    _entry(
+                        f"orig/{split}/{index}_{variant}.png",
+                        "real",
+                        sha=f"{counter:064d}",
+                    ).model_copy(update={"split": split, "extra": {"variant": variant}})
+                )
+        for generator in ("sd2-fr", "sdxl-fr", "ps-sp"):
+            for index in range(4):
+                counter += 1
+                entries.append(
+                    _entry(
+                        f"{generator}/{split}/{index}.png",
+                        "fake",
+                        generator=generator,
+                        sha=f"{counter:064d}",
+                    ).model_copy(
+                        update={
+                            "split": split,
+                            "mask_path": None if index == 3 else f"masks/{generator}/{index}.png",
+                            "extra": {"mask_type": "segm" if index % 2 else "bbox"},
+                        }
+                    )
+                )
+    meta = ManifestMeta(dataset="ds", root="/root", created="2026-01-01")
+    return Manifest(meta=meta, entries=entries)
+
+
+def test_filter_entries_selects_one_split_and_label() -> None:
+    filtered = filter_entries(_sliceable_manifest(), split="train", label="real")
+
+    assert len(filtered.entries) == 12
+    assert {entry.split for entry in filtered.entries} == {"train"}
+    assert {entry.label for entry in filtered.entries} == {"real"}
+
+
+def test_filter_entries_ors_the_generators_and_ands_everything_else() -> None:
+    filtered = filter_entries(
+        _sliceable_manifest(), split="train", label="fake", generators=["sd2-fr", "sdxl-fr"]
+    )
+
+    assert len(filtered.entries) == 8
+    assert {entry.generator for entry in filtered.entries} == {"sd2-fr", "sdxl-fr"}
+
+
+def test_filter_entries_ors_one_extra_keys_values_and_ands_across_keys() -> None:
+    manifest = _sliceable_manifest()
+
+    sizes = filter_entries(
+        manifest, split="train", label="real", extra={"variant": ["orig_512", "orig_1024"]}
+    )
+    assert len(sizes.entries) == 8
+    assert {entry.extra["variant"] for entry in sizes.entries} == {"orig_512", "orig_1024"}
+
+    # A key the entries do not carry at all excludes every one of them.
+    both = filter_entries(manifest, extra={"variant": ["orig"], "mask_type": ["segm"]})
+    assert both.entries == []
+
+
+def test_filter_entries_can_require_or_forbid_a_mask() -> None:
+    manifest = _sliceable_manifest()
+
+    with_mask = filter_entries(manifest, label="fake", require_mask=True)
+    without_mask = filter_entries(manifest, label="fake", require_mask=False)
+
+    assert len(with_mask.entries) == 18
+    assert len(without_mask.entries) == 6
+    assert all(entry.mask_path is not None for entry in with_mask.entries)
+    assert all(entry.mask_path is None for entry in without_mask.entries)
+
+
+def test_filter_entries_dedupe_keeps_the_first_in_path_order() -> None:
+    entries = [
+        _entry("b/second.png", "real", sha="c" * 64),
+        _entry("a/first.png", "real", sha="c" * 64),
+        _entry("c/third.png", "real", sha="d" * 64),
+    ]
+    manifest = Manifest(
+        meta=ManifestMeta(dataset="ds", root="/root", created="2026-01-01"), entries=entries
+    )
+
+    deduped = filter_entries(manifest, dedupe_sha256=True)
+
+    assert [entry.path for entry in deduped.entries] == ["a/first.png", "c/third.png"]
+    # Deterministic regardless of the order the entries arrived in.
+    shuffled = Manifest(meta=manifest.meta, entries=list(reversed(entries)))
+    assert [entry.path for entry in filter_entries(shuffled, dedupe_sha256=True).entries] == [
+        "a/first.png",
+        "c/third.png",
+    ]
+
+
+def test_filter_entries_records_its_criteria_in_the_notes() -> None:
+    filtered = filter_entries(
+        _sliceable_manifest(),
+        split="train",
+        label="fake",
+        generators=["sd2-fr"],
+        extra={"mask_type": ["bbox"]},
+        require_mask=True,
+        dedupe_sha256=True,
+    )
+
+    notes = filtered.meta.notes
+    assert notes is not None
+    assert notes.startswith(f"filtered {len(filtered.entries)} of 48 entries")
+    for fragment in (
+        "split=train",
+        "label=fake",
+        "generator in ['sd2-fr']",
+        "extra.mask_type in ['bbox']",
+        "mask required",
+        "deduped by sha256",
+    ):
+        assert fragment in notes
+
+
+def test_filter_entries_with_no_criteria_keeps_everything_in_path_order() -> None:
+    manifest = _sliceable_manifest()
+
+    filtered = filter_entries(manifest)
+
+    assert len(filtered.entries) == len(manifest.entries)
+    assert [entry.path for entry in filtered.entries] == sorted(
+        entry.path for entry in manifest.entries
+    )
+    assert "no criteria" in (filtered.meta.notes or "")
 
 
 # --- split_by_group() --------------------------------------------------------

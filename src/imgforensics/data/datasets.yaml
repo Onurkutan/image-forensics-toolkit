@@ -427,7 +427,7 @@ datasets:
     download: "https://github.com/IDLabMedia/tgif-dataset#download"
     access: "open"
     license: "CC BY-SA 4.0 (COCO-derived)"
-    commercial_ok: true
+    commercial_ok: false
     approx_size_gb: 65.4
     images: "3,124 authentic (2,440/341/343 train-val-test) -> 74,976 fakes (58,560/8,184/8,232 train-val-test)"
     generators: "SD2, SDXL, Adobe Firefly inpainting (composited and fully-regenerated variants)"
@@ -436,7 +436,15 @@ datasets:
     notes: >-
       A generative-edit dataset with masks and train/val/test splits. The
       CC BY-SA ShareAlike clause means any derived image set built from it
-      must carry the same license if redistributed. `download` points at
+      must carry the same license if redistributed. `commercial_ok` was
+      true here until 2026-09-21 and is now false: benchmarking against
+      the dataset was one thing, but Phase 4b *trains* on it, and this
+      project cannot put a ShareAlike obligation on the weights it ships,
+      so anything derived from TGIF is research-only here. The flag is the
+      input to the AND that
+      `imgforensics.detectors.train._combine_commercial_ok` writes into
+      every checkpoint, which is how the restriction survives the move
+      from data to model. `download` points at
       the README's download section rather than at Zenodo record 14050608,
       which was listed here until 2026-09-21 but holds only the WIFS paper
       (a single 345.9 kB PDF, CC BY 4.0) and no images -- the images live

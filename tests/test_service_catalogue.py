@@ -131,9 +131,10 @@ def test_a_weight_gated_tool_is_not_installed_until_its_weights_are_there(
 ) -> None:
     monkeypatch.setenv("IMGFORENSICS_WEIGHTS_DIR", str(tmp_path / "weights"))
     monkeypatch.setenv("IMGFORENSICS_HEAD_DIR", str(tmp_path / "head"))
+    monkeypatch.setenv("IMGFORENSICS_INPAINT_DIR", str(tmp_path / "inpaint"))
 
     by_name = _by_name()
-    for name in ("iml_vit", "catnet_v2", "localizer_ensemble", "dinov2_head"):
+    for name in ("iml_vit", "catnet_v2", "dino_inpaint", "localizer_ensemble", "dinov2_head"):
         assert by_name[name].needs_ml is True
         assert by_name[name].installed is False, name
 
@@ -145,6 +146,35 @@ def test_a_weight_gated_tool_is_not_installed_until_its_weights_are_there(
     assert by_name["iml_vit"].installed is True
     assert by_name["catnet_v2"].installed is False
     # The ensemble runs whichever members it has, so one member is enough.
+    assert by_name["localizer_ensemble"].installed is True
+
+
+@requires_ml
+def test_a_trained_inpainting_checkpoint_alone_installs_the_ensemble(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``dino_inpaint`` is trained, not fetched, so it has no WEIGHTS entry.
+
+    The ensemble's installed flag used to look every member up in WEIGHTS,
+    which raises for a member that is not there -- so with no pretrained
+    weights on the machine, listing the catalogue itself would fail. It now
+    asks each member through the same ``is_installed`` the catalogue uses for
+    the member on its own.
+    """
+    monkeypatch.setenv("IMGFORENSICS_WEIGHTS_DIR", str(tmp_path / "weights"))
+    inpaint_dir = tmp_path / "inpaint"
+    inpaint_dir.mkdir()
+    monkeypatch.setenv("IMGFORENSICS_INPAINT_DIR", str(inpaint_dir))
+
+    assert _by_name()["localizer_ensemble"].installed is False
+
+    (inpaint_dir / "inpaint.json").write_text("{}", encoding="utf-8")
+    (inpaint_dir / "inpaint.safetensors").write_bytes(b"stand-in for weights")
+
+    by_name = _by_name()
+    assert by_name["dino_inpaint"].installed is True
+    assert by_name["catnet_v2"].installed is False
+    assert by_name["iml_vit"].installed is False
     assert by_name["localizer_ensemble"].installed is True
 
 

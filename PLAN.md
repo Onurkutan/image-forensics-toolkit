@@ -6,23 +6,25 @@ the workbench design in [docs/design/01_toolbox_architecture.md](docs/design/01_
 
 ## Status
 
-- Now: Phase 6 shipped through 6d; 6e's first slice (a `jpeglib` fast path for the JPEG coefficient
-  reader, decoder time down ~33x) is in; TGIF is on disk with a layout, a manifest and the first
-  localizer benchmarks (`docs/benchmarks/09_tgif_localizers_summary.md`). Experiment 04 (laundering
-  simulation) was probed and dropped: the head's real-class failure is content, not compression
-  (`docs/benchmarks/09_exp04_laundering_probe_summary.md`).
-- Next step: **Phase 4b, the own inpainting localizer** -- a DINOv2 patch-level localizer (LoRA or a
-  light head) trained on TGIF's training split, aimed at the fully regenerated images where the
-  released localizers score at the predict-everything baseline; evaluate on TGIF test (per subset),
-  CocoGlide and the localization robustness suite, with `catnet_v2` as the baseline in every table.
-  First sub-steps: dedupe the reals by sha256 for training, decide the patch-label rule from the
-  masks, and check DinoLizer's code availability once more.
+- Now: **Phase 4b, stage 1 passed.** `dino_inpaint` (frozen DINOv2 patch tokens, a 1.2 M-parameter
+  patch head, 448 px crops) trained on TGIF's regenerated subsets reaches pixel best-F1 0.567 / 0.575
+  on sd2-fr / sdxl-fr (CAT-Net 0.325 / 0.205) and 0.637 on CocoGlide, a generator it never saw
+  (CAT-Net 0.605); every bar fixed before the run was cleared
+  (`docs/benchmarks/10_dino_inpaint_summary.md`). Checkpoint `weights/dino_inpaint_01`
+  (research-only, TGIF is CC BY-SA). The implementation (`train localizer`, `manifest filter`,
+  the localizer, tests) is in the tree, uncommitted until the ensemble measurement below.
+- Next step: `dino_inpaint` joins `localizer_ensemble` (implemented, uncommitted); benchmark the
+  three-member `max` ensemble on `tgif_test_2000` and CocoGlide to see whether it takes CAT-Net's
+  spliced-subset numbers and `dino_inpaint`'s regenerated ones; record the full 9,261-image TGIF
+  test split for `dino_inpaint`; then commit the 4b milestone. After that: a threshold study on
+  the validation split (a third of authentic images clear 0.5 somewhere in the heatmap), and
+  optionally stage 2 (LoRA r=8 on qkv, ~3 h) to move past the frozen space's one-epoch ceiling.
 - Queued after that: 6e slice 2, progressive-JPEG coefficients through libjpeg (80% of ITW-SM files
   are progressive and `catnet_v2` currently re-encodes them, so this changes results and needs a
   re-benchmark); the full 9,261-image TGIF test split and its robustness suite; 6c publish (HF Space
   and head weights, one-line heads-up first); the per-year decay chart.
 - Blockers: none. (TGIF's manual download is done; TGIF2 FLUX/random are not downloaded.)
-- Last update: 2026-09-21
+- Last update: 2026-09-23
 
 ## Milestones
 
@@ -40,7 +42,10 @@ benchmark milestone also reproduces its table from saved records with `imgforens
 ### M4 Manipulation localization (Phase 4)
 - [x] 4a: `iml_vit`, `catnet_v2`, `localizer_ensemble`, CocoGlide tables
 - [x] TGIF: download, layout with mask pairing, manifest, first localizer benchmarks (2026-09-21)
-- [ ] 4b: own DINOv2 inpainting localizer trained on TGIF (fully regenerated images are the target)
+- [x] 4b stage 1: `dino_inpaint`, own DINOv2 inpainting localizer trained on TGIF's regenerated
+      subsets; passes the pre-registered bars on TGIF and CocoGlide (2026-09-23)
+- [ ] 4b follow-ups: three-member ensemble measurement, threshold study, optional stage-2 LoRA,
+      the ablations (block 11 only, hard targets, context kernel 1)
 - [ ] full TGIF test split and localization robustness suite for the record
 ### M5 Fusion and explanation (Phase 5) -- done 2026-09-10
 ### M6 Product and release (Phase 6)
@@ -54,6 +59,13 @@ benchmark milestone also reproduces its table from saved records with `imgforens
 
 ## Decisions
 
+- 2026-09-23 -- 4b stage 1 (head only, frozen backbone) is accepted as the localizer; stage 2 (LoRA)
+  is optional, not a prerequisite. Why: the pre-registered bars were all cleared, and the validation
+  curve shows the frozen feature space saturating in one epoch, so LoRA is the priced way past that
+  ceiling rather than a fix. Training on the regenerated subsets only was deliberate: the spliced
+  subsets' edge cue is what CAT-Net already reads, and mixing it in would have hidden the number
+  that mattered. Alternatives considered: all four subsets (a general inpainting localizer, worse
+  readability), SegFormer-B2 (the roadmap's fallback, not needed).
 - 2026-09-21 -- Experiment 04 (train on simulated social-media laundering) not run. Why: laundering
   COCO reals moves the exp03 head's FPR only from 2.6% to at most 8.9%, and on ITW-SM both heads
   call the *least* compressed reals fake most often; the failure is content/source, not

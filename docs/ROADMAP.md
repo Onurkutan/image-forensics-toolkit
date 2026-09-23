@@ -289,6 +289,18 @@ measured the same way from its first training run.
   gap 4b has to close. `iml_vit` stays near chance and the `max` ensemble loses to CAT-Net alone
   on every subset. See
   [`docs/benchmarks/09_tgif_localizers_summary.md`](benchmarks/09_tgif_localizers_summary.md).
+- **Result of 4b, stage 1 (2026-09-23):** `dino_inpaint`, a 1.19 M-parameter convolutional patch
+  head over the frozen DINOv2 ViT-B/14 (blocks 5/8/11, 448 px crops, tiled inference, never
+  resized), trained 88 minutes on TGIF's regenerated subsets only. On the 2,000-image TGIF test
+  sample it reaches pixel best-F1 **0.567** (sd2-fr) and **0.575** (sdxl-fr) where `catnet_v2`
+  scores 0.325 / 0.205 and the predict-everything baseline 0.226 / 0.114, with image-level AUC
+  0.87 / 0.90 against the reals (CAT-Net below chance); on CocoGlide, a generator it never saw,
+  best-F1 **0.637** and AP 0.672 against CAT-Net's 0.605 / 0.566. It trails CAT-Net by 0.4-0.5
+  best-F1 on the spliced subsets it was not trained on, and a third of authentic images clear
+  0.5 somewhere in their heatmap: the two localizers are complementary and the fixed threshold
+  is the open weakness. The verdict rules were fixed before the run and every bar was cleared;
+  stage 2 (LoRA) is optional. See
+  [`docs/benchmarks/10_dino_inpaint_summary.md`](benchmarks/10_dino_inpaint_summary.md).
 
 ### Phase 5 — Fusion and explanation
 

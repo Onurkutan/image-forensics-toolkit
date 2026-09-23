@@ -1,57 +1,72 @@
 """An ensemble that combines the registered localizers into one heatmap.
 
-``iml_vit`` and ``catnet_v2`` read different evidence -- one looks only at
-pixels, the other also at the JPEG stream's quantized coefficients (see
-:mod:`imgforensics.localization.iml_vit` and
-:mod:`imgforensics.localization.catnet`) -- and on CocoGlide they disagree
-about *where* an edit is often enough that averaging their maps is worth
-measuring. This detector does exactly that and nothing more: it owns one
-instance of each member, runs them, combines their heatmaps pixelwise, and
-derives an image-level score from the result with the same top-1% rule the
-members use (:func:`imgforensics.localization._scoring.top_fraction_score`),
-so its score sits in the same benchmark column as theirs.
+Its three default members (:data:`DEFAULT_MEMBERS`) read different evidence:
+``catnet_v2`` also reads the JPEG stream's quantized coefficients, ``iml_vit``
+looks only at pixels (see :mod:`imgforensics.localization.catnet` and
+:mod:`imgforensics.localization.iml_vit`), and ``dino_inpaint`` reads the
+texture statistics a frozen DINOv2 sees in 14 px patches, with a head trained
+on *fully regenerated* inpaints (:mod:`imgforensics.localization.dino_inpaint`).
+The first two are splicing localizers; they find a composited region by its
+seam and sit near the predict-everything baseline on an edit that has none,
+which is exactly where the third one works -- on TGIF's regenerated subsets
+``catnet_v2`` scores a pixel best-F1 of 0.33 / 0.21 against ``dino_inpaint``'s
+0.57 / 0.58 (``docs/benchmarks/10_dino_inpaint_summary.md``). This detector
+runs them, combines their heatmaps pixelwise, and derives an image-level score
+from the result with the same top-1% rule the members use
+(:func:`imgforensics.localization._scoring.top_fraction_score`), so its score
+sits in the same benchmark column as theirs.
 
 **The three modes**, chosen with ``mode=`` or the
 :data:`MODE_ENV` environment variable:
 
-- ``"mean"``: the pixelwise mean. Both members emit calibrated
-  probabilities, so their mean is still a probability, and a fixed 0.5
-  threshold keeps meaning what it means for either member alone.
+- ``"mean"``: the pixelwise mean. Every member emits probabilities, so their
+  mean is still a probability, and a fixed 0.5 threshold keeps meaning what
+  it means for any member alone -- but one member that is confident about a
+  region the others do not see gets its signal divided by the member count.
 - ``"max"`` (the default): the pixelwise maximum. Takes whichever member is
-  more confident at each pixel, which finds a region one member missed
-  entirely at the cost of inheriting the other's false positives. It is the
-  default because it is the one combination that keeps the better-calibrated
-  member's behaviour at a fixed threshold: on CocoGlide the mean halves
-  CAT-Net's F1@0.5 (IML-ViT's near-zero probabilities pull every pixel down)
-  while the maximum matches it (see
-  ``docs/benchmarks/05_cocoglide_ensemble_summary.md``).
+  most confident at each pixel, which finds a region the others missed
+  entirely at the cost of inheriting every member's false positives. It is
+  the default because it is the one combination that keeps the
+  better-calibrated member's behaviour at a fixed threshold: on CocoGlide,
+  with the two pretrained members, the mean halves CAT-Net's F1@0.5
+  (IML-ViT's near-zero probabilities pull every pixel down) while the
+  maximum matches it (see ``docs/benchmarks/05_cocoglide_ensemble_summary.md``).
+  It is also the rule under which a specialist member like ``dino_inpaint``
+  can contribute its region without being averaged away by two members that
+  see nothing there. The three-member numbers are a benchmark still to run.
 - ``"rank_mean"``: each member's map is first replaced by its own per-image
   percentile rank, then averaged. This equalizes members whose probabilities
   live on different scales -- useful when one member is systematically
-  under-confident -- but it **discards the absolute calibration of both**: a
-  rank map's values are, by construction, spread uniformly over [0, 1], so
-  thresholding one at 0.5 marks the upper half of the image no matter what
-  the image contains. Pixel AP and best-F1 stay meaningful under it (they
-  only need the ranking); F1@0.5 and IoU@0.5 do not. That is why it is not
-  the default.
+  under-confident -- but it **discards the absolute calibration of all of
+  them**: a rank map's values are, by construction, spread uniformly over
+  [0, 1], so thresholding one at 0.5 marks the upper half of the image no
+  matter what the image contains. Pixel AP and best-F1 stay meaningful under
+  it (they only need the ranking); F1@0.5 and IoU@0.5 do not. That is why it
+  is not the default.
 
 **Memory.** The ensemble builds its own member instances rather than sharing
-whatever the caller already holds, so a ``benchmark`` run that lists
-``iml_vit``, ``catnet_v2`` *and* ``localizer_ensemble`` together loads each
-model twice and holds both copies for the whole run. On a 6 GB card, run the
-ensemble in a separate ``benchmark`` invocation from its members.
+whatever the caller already holds, so a ``benchmark`` run that lists the
+members *and* ``localizer_ensemble`` together loads each model twice and holds
+both copies for the whole run. Members run one after another, so the peak is
+the three models' weights plus the largest single member's activations, not
+the sum of all three; still, on a 6 GB card, run the ensemble in a separate
+``benchmark`` invocation from its members.
 
 Members that have no weights installed are dropped at :meth:`load` time and
 those that abstain at prediction time are dropped from the combination, so
-the ensemble degrades to whichever members are actually available. With none
-of them available it abstains itself -- 0.5, ``"uncertain"``, and a
-``details["reason"]`` naming the members that were missing -- rather than
-failing a run, the same contract the members have.
+the ensemble degrades to whichever members are actually available -- and
+``details["members"]`` names the ones whose heatmap was actually combined, so
+a run whose ``dino_inpaint`` checkpoint was not found (it is resolved from
+``$IMGFORENSICS_INPAINT_DIR``, then ``weights/dino_inpaint``) is visibly a
+two-member run rather than silently mislabelled. With none of them available
+it abstains itself -- 0.5, ``"uncertain"``, and a ``details["reason"]``
+naming the members that were missing -- rather than failing a run, the same
+contract the members have.
 
 This module imports no ``torch`` at all, not even inside a function: it only
 ever calls its members, and each of them owns its own heavy imports. So
-registering it costs nothing at startup, exactly as for the two wrappers it
-builds on.
+registering it costs nothing at startup, exactly as for the wrappers it builds
+on.
 """
 
 from __future__ import annotations
@@ -84,8 +99,12 @@ MODE_ENV = "IMGFORENSICS_LOCALIZER_ENSEMBLE_MODE"
 #: The mode used when neither the constructor nor the environment says.
 DEFAULT_MODE: Mode = "max"
 
-#: Registry names of the members combined by default, in the order they run.
-DEFAULT_MEMBERS: tuple[str, ...] = ("catnet_v2", "iml_vit")
+#: Registry names of the members combined by default, in the order they run:
+#: the two pretrained splicing localizers first, then the project's own
+#: inpainting localizer. Order only decides run order and the order of
+#: ``details["members"]``; every mode is symmetric in its inputs. A different
+#: set is one constructor argument away (``members=``).
+DEFAULT_MEMBERS: tuple[str, ...] = ("catnet_v2", "iml_vit", "dino_inpaint")
 
 #: Probability above which a pixel counts as manipulated, matching the
 #: members and this project's pixel metrics
@@ -125,7 +144,7 @@ def resolve_mode(mode: str | None = None) -> Mode:
 def resize_heatmap(heatmap: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     """Return ``heatmap`` at ``(height, width)``, bilinearly resampled if needed.
 
-    Both current members return a map of the image's own shape, so this is
+    Every current member returns a map of the image's own shape, so this is
     usually a no-op cast. It exists for a member that predicts at a reduced
     resolution: the combination is pixelwise, so every map must share one
     grid, and the image's own grid is the one the caller's mask is aligned to.
@@ -241,10 +260,11 @@ class LocalizerEnsemble(BaseDetector):
                 default=resolve_mode(),
                 choices=list(MODES),
                 description=(
-                    "How the member heatmaps are combined: 'mean' keeps both members' "
-                    "calibration, 'max' takes whichever member is more confident per pixel, "
-                    "'rank_mean' equalizes members on different scales but discards their "
-                    "calibration, so a 0.5 threshold stops meaning anything under it."
+                    "How the member heatmaps are combined: 'mean' keeps the members' "
+                    "calibration but dilutes a region only one of them sees, 'max' takes "
+                    "whichever member is most confident per pixel, 'rank_mean' equalizes "
+                    "members on different scales but discards their calibration, so a 0.5 "
+                    "threshold stops meaning anything under it."
                 ),
             )
         ]
@@ -294,8 +314,8 @@ class LocalizerEnsemble(BaseDetector):
         false after its own ``load()`` is dropped here and named in the
         abstention reason if nothing is left. A member that exposes no
         ``is_loaded`` at all -- any plain :class:`BaseDetector` -- is taken to
-        be ready, since only the two weight-gated localizers have anything to
-        be missing.
+        be ready, since only a localizer with weights or a trained checkpoint
+        has anything to be missing.
 
         ``device`` defaults to ``"auto"`` rather than the base class's
         ``"cpu"``, matching the members: a caller that runs this detector at

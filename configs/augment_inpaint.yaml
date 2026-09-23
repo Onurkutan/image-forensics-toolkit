@@ -1,0 +1,37 @@
+# Training-time augmentation for the dino_inpaint localizer
+# (imgforensics.eval.preprocess.AugmentationConfig).
+#
+# Narrower than configs/augment_default.yaml on purpose. That file exists to
+# destroy a shortcut: a whole-image detector trained on pristine PNG fakes
+# against JPEG reals learns the compression history instead of the generator.
+# Here both classes come out of the same dataset as pristine PNGs and the crop
+# is cut from an image that is half authentic anyway, so there is no such
+# shortcut to destroy -- the augmentation's job is only to keep the head from
+# keying on a re-encoding that a deployed image would have gone through.
+#
+# What is dropped, and why:
+#   - gaussian_blur_sigma and downscale_upscale are low-pass filters, and the
+#     evidence a patch-level inpainting head reads is high-frequency texture.
+#     Blurring the crop removes the label's justification without removing the
+#     label, which teaches the head to guess.
+#   - cutout blanks a square of pixels the target still calls authentic or
+#     inpainted; on a 32x32 patch grid that is a mislabeled region, not an
+#     occlusion.
+#
+# Applied identically to both classes, after the crop, in
+# imgforensics.localization.train_inpaint.CropDataset.
+#
+# Never use this at evaluation time -- the fixed, versioned protocol for that
+# is imgforensics.eval.robustness (eval/robustness_default.yaml).
+
+jpeg_quality: [50, 100]
+webp_quality: [70, 95]
+noise_sigma: [0.0, 5.0]
+
+# Fallback rate for any augmentation not listed below.
+p: 0.5
+
+probabilities:
+  jpeg_quality: 0.7
+  webp_quality: 0.2
+  noise_sigma: 0.3

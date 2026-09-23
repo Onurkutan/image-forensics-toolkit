@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Literal, cast, get_args
 
 import numpy as np
 import typer
@@ -29,6 +29,7 @@ from imgforensics.data import (
     build_manifest,
     crop_entries,
     fetch,
+    filter_entries,
     get_dataset,
     get_recipe,
     label_from_parent_folder,
@@ -39,6 +40,7 @@ from imgforensics.data import (
     sample,
     split_by_group,
 )
+from imgforensics.data.manifest import Label, Split
 
 # The demo's gradio-free half, so that importing the one default it shares
 # with this command costs nothing on an install without the optional extra.
@@ -1112,6 +1114,105 @@ def train_head_command(
     )
 
 
+@train_app.command("localizer")
+def train_localizer_command(
+    config_path: Annotated[
+        Path,
+        typer.Option(
+            "--config",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help="Training config YAML (see configs/experiments/4b_dino_inpaint_stage1.yaml).",
+        ),
+    ],
+    epochs: Annotated[
+        int | None, typer.Option("--epochs", help="Override the config's epoch count.")
+    ] = None,
+    out: Annotated[
+        Path | None, typer.Option("--out", help="Override the config's output directory.")
+    ] = None,
+    crops_per_epoch: Annotated[
+        int | None,
+        typer.Option("--crops-per-epoch", help="Override the config's crops-per-epoch budget."),
+    ] = None,
+    val_limit: Annotated[
+        int | None,
+        typer.Option("--val-limit", help="Validate on only the first N manifest entries."),
+    ] = None,
+) -> None:
+    """Train the dino_inpaint patch head over a frozen DINOv2 and write its checkpoint."""
+    _require_ml()
+
+    # Imported here, not at module scope: this command needs torch, and paying
+    # its import on every other command would be wasteful.
+    from imgforensics.localization.dino_inpaint import INPAINT_DIR_ENV
+    from imgforensics.localization.train_inpaint import InpaintTrainConfig, train_inpaint
+
+    config = InpaintTrainConfig.from_yaml(config_path)
+    overrides: dict[str, Any] = {}
+    if epochs is not None:
+        overrides["epochs"] = epochs
+    if out is not None:
+        overrides["out_dir"] = out
+    if crops_per_epoch is not None:
+        overrides["crops_per_epoch"] = crops_per_epoch
+    if val_limit is not None:
+        overrides["val_limit"] = val_limit
+    if overrides:
+        config = config.model_copy(update=overrides)
+
+    for manifest_field in (
+        config.train_fake_manifest,
+        config.train_real_manifest,
+        config.val_manifest,
+    ):
+        if not Path(manifest_field).is_file():
+            raise typer.BadParameter(
+                f"Manifest {manifest_field} does not exist. Build one with "
+                "'imgforensics manifest filter' from the dataset's own manifest."
+            )
+
+    console.print(
+        f"Training a {config.model.backbone} patch head at {config.model.crop_size} px "
+        f"({config.crops_per_epoch} crops/epoch, up to {config.epochs} epochs) "
+        f"-> {config.out_dir}"
+    )
+    report = train_inpaint(config, progress=True)
+    meta = report.meta
+
+    table = Table(title="Localizer training report")
+    table.add_column("field", style="bold")
+    table.add_column("value")
+    table.add_row("device", config.device)
+    table.add_row("head parameters", f"{report.head_parameters:,}")
+    table.add_row("LoRA parameters", f"{report.lora_parameters:,}")
+    table.add_row("layers", ", ".join(str(layer) for layer in meta.layers))
+    table.add_row(
+        "train images", ", ".join(f"{name}={count}" for name, count in report.train_images.items())
+    )
+    table.add_row("crops per epoch", f"{report.crops_per_epoch}")
+    table.add_row("val images", f"{report.val_images}")
+    table.add_row("epochs run (best)", f"{meta.epochs_run} ({meta.best_epoch})")
+    table.add_row("val best-F1 (fakes)", f"{meta.val.best_f1:.4f}")
+    table.add_row(
+        "val AP / F1@0.5 / IoU",
+        f"{meta.val.ap:.4f} / {meta.val.f1_at_threshold:.4f} / {meta.val.iou:.4f}",
+    )
+    table.add_row("val area >0.5 (reals)", f"{meta.val.real_area_above_threshold:.4f}")
+    table.add_row("commercial_ok", "-" if meta.commercial_ok is None else str(meta.commercial_ok))
+    table.add_row("licenses", ", ".join(meta.licenses) or "-")
+    table.add_row("throughput", f"{report.crops_per_second:.1f} crops/s")
+    table.add_row("elapsed", f"{report.elapsed_s:.2f} s")
+    console.print(table)
+    console.print(f"Wrote {report.weights_path}, {report.metadata_path} and {report.log_path}")
+    console.print(
+        f"Use it with: set {INPAINT_DIR_ENV}={report.out_dir} "
+        "(or copy it to weights/dino_inpaint), then run "
+        "'imgforensics analyze IMAGE --detector dino_inpaint'"
+    )
+
+
 @manifest_app.command("build")
 def manifest_build(
     root: Annotated[
@@ -1175,6 +1276,82 @@ def manifest_sample(
     sampled = sample(manifest, n, seed=seed, stratify_by=fields)
     sampled.save(out)
     console.print(f"Wrote {len(sampled.entries)} of {len(manifest.entries)} entries to {out}")
+
+
+@manifest_app.command("filter")
+def manifest_filter(
+    in_path: Annotated[
+        Path,
+        typer.Argument(exists=True, dir_okay=False, readable=True, help="Input manifest .jsonl."),
+    ],
+    out: Annotated[Path, typer.Option("--out", help="Path to write the filtered manifest to.")],
+    split: Annotated[
+        str | None, typer.Option("--split", help="Keep only this split (train, val or test).")
+    ] = None,
+    label: Annotated[
+        str | None, typer.Option("--label", help="Keep only this label (real or fake).")
+    ] = None,
+    generator: Annotated[
+        list[str] | None,
+        typer.Option("--generator", help="Keep only these generators (repeatable; any match)."),
+    ] = None,
+    extra: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--extra",
+            help=(
+                "Keep only entries whose extra.KEY is VALUE, as KEY=VALUE (repeatable; every "
+                "named key must match, and a key given several times matches any of its values)."
+            ),
+        ),
+    ] = None,
+    require_mask: Annotated[
+        bool | None,
+        typer.Option(
+            "--require-mask/--no-mask",
+            help="Keep only entries that have (or that lack) a mask; unset keeps both.",
+        ),
+    ] = None,
+    dedupe_sha256: Annotated[
+        bool,
+        typer.Option(
+            "--dedupe-sha256",
+            help="Drop repeated images, keeping the first in path-sorted order.",
+        ),
+    ] = False,
+) -> None:
+    """Narrow a manifest to one split/label/generator/extra slice (see manifest.filter_entries)."""
+    extra_values: dict[str, list[str]] = {}
+    for item in extra or []:
+        key, separator, value = item.partition("=")
+        if not separator or not key:
+            raise typer.BadParameter(f"--extra expects KEY=VALUE, got {item!r}")
+        extra_values.setdefault(key, []).append(value)
+
+    # A misspelled split or label would otherwise match nothing, write an empty
+    # manifest and exit 0 -- a silent failure at the top of a training run.
+    # A generator or an extra key cannot be checked this way: both are dataset
+    # vocabulary, not a closed set.
+    for option, given, allowed in (
+        ("--split", split, get_args(Split)),
+        ("--label", label, get_args(Label)),
+    ):
+        if given is not None and given not in allowed:
+            raise typer.BadParameter(f"{option} must be one of {', '.join(allowed)}, got {given!r}")
+
+    manifest = Manifest.load(in_path)
+    filtered = filter_entries(
+        manifest,
+        split=cast("Split | None", split),
+        label=cast("Label | None", label),
+        generators=generator or None,
+        extra=extra_values or None,
+        require_mask=require_mask,
+        dedupe_sha256=dedupe_sha256,
+    )
+    filtered.save(out)
+    console.print(f"Wrote {len(filtered.entries)} of {len(manifest.entries)} entries to {out}")
+    console.print(json.dumps(filtered.summary(), indent=2))
 
 
 @manifest_app.command("merge")

@@ -1,0 +1,83 @@
+# Phase 4b, stage 1: the dino_inpaint patch head over a fully frozen DINOv2
+# (imgforensics.localization.train_inpaint.InpaintTrainConfig).
+#
+#   imgforensics train localizer --config configs/experiments/4b_dino_inpaint_stage1.yaml
+#
+# The manifests are the TGIF slices of the run plan; build them first with
+# `manifest filter`, from the manifest `datasets prepare TGIF` writes:
+#
+#   imgforensics manifest filter data/manifests/tgif.jsonl --out data/manifests/tgif_train_fr.jsonl \
+#       --split train --label fake --generator sd2-fr --generator sdxl-fr --require-mask
+#   imgforensics manifest filter data/manifests/tgif.jsonl --out data/manifests/tgif_train_real.jsonl \
+#       --split train --label real --extra variant=orig_512 --extra variant=orig_1024 --dedupe-sha256
+#
+# and the 500-entry validation subset (200 sd2-fr, 200 sdxl-fr, 50 orig_512,
+# 50 orig_1024) by filtering the val split per stratum, sampling each with
+# seed 0, and merging the four. It is small on purpose: validation runs the
+# full inference path at native resolution, so it costs a couple of minutes an
+# epoch already.
+#
+# TGIF is CC BY-SA 4.0, whose ShareAlike clause makes weights derived from it
+# research-only for this project; the manifests carry commercial_ok: false and
+# the checkpoint records it.
+
+train_fake_manifest: data/manifests/tgif_train_fr.jsonl
+train_real_manifest: data/manifests/tgif_train_real.jsonl
+val_manifest: data/manifests/tgif_val_fr_500.jsonl
+
+# Crop, never resize. 448 px is 32x32 patches of 14; blocks 5, 8 and 11 of the
+# ViT-B are 2304 channels per patch once concatenated. Reading only block 11
+# is the declared ablation.
+model:
+  backbone: dinov2_vitb14
+  layers: [5, 8, 11]
+  crop_size: 448
+  stride: 336
+  patch: 14
+  head:
+    dim: 768
+    proj_dim: 256
+    # 1 drops the 3x3 and makes the head a per-patch MLP (the ablation).
+    context_kernel: 3
+
+# "soft" regresses each patch's mask area; "hard" thresholds it at 0.5 first.
+patch_target: soft
+
+# Share of each epoch's crops per class. The two fully regenerated subsets get
+# equal weight and the authentic images just under a third, which is roughly
+# the positive rate a guided draw produces at the patch level.
+sampling:
+  real: 0.30
+  sd2-fr: 0.35
+  sdxl-fr: 0.35
+
+# Half of a fake's crops are placed to cover a uniformly drawn mask pixel
+# (uniformly among the placements that cover it, never centered on it). Without
+# this, an sdxl-fr crop misses the mask entirely 36% of the time.
+positive_crop_fraction: 0.5
+
+augment: configs/augment_inpaint.yaml
+flip_probability: 0.5
+
+# The patch targets average about 0.1, so unweighted BCE is minimized by
+# predicting nothing; the Dice term scores the predicted region's shape.
+pos_weight: 3.0
+dice_weight: 0.5
+
+epochs: 20
+crops_per_epoch: 20000
+batch_size: 8
+lr: 0.0003
+weight_decay: 0.01
+early_stopping_patience: 4
+num_workers: 4
+seed: 0
+
+# Stage 1 trains the head alone; the backbone never moves.
+lora: null
+grad_checkpointing: false
+
+# Gitignored, like everything else under weights/. The localizer picks a
+# checkpoint up from here by default; IMGFORENSICS_INPAINT_DIR overrides it.
+out_dir: weights/dino_inpaint
+device: auto

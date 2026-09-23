@@ -38,7 +38,12 @@ DETECTOR_NOTES: dict[str, str] = {
     ),
     "iml_vit": "IML-ViT pixel-level manipulation localization, reduced to an image score",
     "catnet_v2": "CAT-Net v2 compression-aware localization, reduced to an image score",
-    "localizer_ensemble": "IML-ViT and CAT-Net v2's heatmaps combined pixelwise",
+    "dino_inpaint": (
+        "Patch-level AI-inpainting localization over a frozen DINOv2, reduced to an image score"
+    ),
+    "localizer_ensemble": (
+        "CAT-Net v2, IML-ViT and the DINOv2 inpainting localizer's heatmaps combined pixelwise"
+    ),
     # The views (imgforensics.views) claim no verdict, so their notes say what
     # the map shows and stop there.
     "luminance_gradient": "map of how sharply brightness changes, pixel by pixel",

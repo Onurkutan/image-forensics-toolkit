@@ -3,9 +3,12 @@
 - :mod:`imgforensics.data.manifest` -- build/save/load a JSON-Lines manifest
   of labeled images (path, label, source, sha256, resolution, JPEG quality),
   plus :func:`~imgforensics.data.manifest.sample` (stratified subsampling),
-  :func:`~imgforensics.data.manifest.merge` (combine manifests), and
-  :func:`~imgforensics.data.manifest.crop_entries` (native-resolution
-  crops, to equalize resolution between classes without resampling).
+  :func:`~imgforensics.data.manifest.merge` (combine manifests),
+  :func:`~imgforensics.data.manifest.filter_entries` (narrow a manifest to
+  one split/label/generator/``extra`` slice, optionally deduplicated by
+  sha256), and :func:`~imgforensics.data.manifest.crop_entries`
+  (native-resolution crops, to equalize resolution between classes without
+  resampling).
 - :mod:`imgforensics.data.registry` -- catalogue of external datasets
   (``datasets.yaml``), with license and ``commercial_ok`` metadata.
 - :mod:`imgforensics.data.audit` -- compares the real/fake halves of a
@@ -46,6 +49,7 @@ from imgforensics.data.manifest import (
     ManifestMeta,
     build_manifest,
     crop_entries,
+    filter_entries,
     label_from_parent_folder,
     merge,
     sample,
@@ -77,6 +81,7 @@ __all__ = [
     "build_manifest",
     "crop_entries",
     "fetch",
+    "filter_entries",
     "get_dataset",
     "get_layout",
     "get_recipe",

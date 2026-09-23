@@ -76,7 +76,9 @@ _DETAIL_VALUE_LIMIT = 100
 #: registry names, rather than importing ``imgforensics.detectors``/
 #: ``imgforensics.localization`` just for a name list.
 _LEARNED_DETECTOR_NAMES = frozenset({"dinov2_head"})
-_LOCALIZER_DETECTOR_NAMES = frozenset({"iml_vit", "catnet_v2"})
+_LOCALIZER_DETECTOR_NAMES = frozenset(
+    {"iml_vit", "catnet_v2", "dino_inpaint", "localizer_ensemble"}
+)
 
 #: Curated "most informative" detail keys per detector, shown in ``report.md``'s
 #: two-column table -- the full ``details`` dict already lives in

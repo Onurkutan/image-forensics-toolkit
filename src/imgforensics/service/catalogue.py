@@ -46,6 +46,7 @@ _CATEGORIES: dict[str, str] = {
     "iml_vit": "Tampering",
     "catnet_v2": "Tampering",
     "localizer_ensemble": "Tampering",
+    "dino_inpaint": "AI generation",
     "dinov2_head": "AI generation",
     "sd_watermark": "Noise",
     "noise_residual": "Noise",
@@ -70,17 +71,22 @@ _DISPLAY_NAMES: dict[str, str] = {
     "iml_vit": "IML-ViT",
     "catnet_v2": "CAT-Net v2",
     "localizer_ensemble": "Localizer ensemble",
+    "dino_inpaint": "DINOv2 inpainting localizer",
 }
 
 #: Tools that only exist when the optional ``ml`` extra is installed. Listed
 #: explicitly rather than inferred from :data:`~imgforensics.core.types.ToolKind`,
 #: because a classical detector or localizer needing no torch is a perfectly
 #: possible future entry.
-_NEEDS_ML = frozenset({"dinov2_head", "iml_vit", "catnet_v2", "localizer_ensemble"})
+_NEEDS_ML = frozenset({"dinov2_head", "iml_vit", "catnet_v2", "localizer_ensemble", "dino_inpaint"})
 
 #: Files a trained head is made of; both must exist for ``dinov2_head`` to
 #: count as installed (:mod:`imgforensics.detectors.learned`).
 _HEAD_FILES = ("head.json", "head.safetensors")
+
+#: The same for ``dino_inpaint``, whose checkpoint is trained here rather than
+#: downloaded (:mod:`imgforensics.localization.dino_inpaint`).
+_INPAINT_FILES = ("inpaint.json", "inpaint.safetensors")
 
 
 class ToolSpec(BaseModel):
@@ -127,12 +133,13 @@ def is_installed(name: str) -> bool:
     """Whether ``name`` has everything it needs to run on this machine.
 
     Answered from the filesystem alone, so it costs nothing and works without
-    the ``ml`` extra: the two localizers and the ensemble look for the weight
-    files :mod:`imgforensics.localization.weights` would download (the
-    ensemble is installed as soon as *one* member is, since it runs whichever
-    members it has), and the learned detector looks for the head checkpoint
-    under ``$IMGFORENSICS_HEAD_DIR``. Anything else -- every signal, every
-    view -- is installed by virtue of being importable.
+    the ``ml`` extra: the two pretrained localizers look for the weight files
+    :mod:`imgforensics.localization.weights` would download, the two models
+    this project trains itself look for their checkpoints under
+    ``$IMGFORENSICS_HEAD_DIR`` and ``$IMGFORENSICS_INPAINT_DIR``, and the
+    ensemble is installed as soon as *one* of its members is, since it runs
+    whichever members it has. Anything else -- every signal, every view -- is
+    installed by virtue of being importable.
     """
     if name in WEIGHTS:
         return weights_file(name).is_file()
@@ -142,12 +149,23 @@ def is_installed(name: str) -> bool:
         # registered itself, which means the module is already imported.
         from imgforensics.localization.ensemble import DEFAULT_MEMBERS
 
-        return any(weights_file(member).is_file() for member in DEFAULT_MEMBERS)
+        # Asked member by member through this same function rather than by
+        # looking each one up in WEIGHTS: dino_inpaint is trained, not
+        # fetched, so it has no WEIGHTS entry and weights_file() would raise.
+        return any(is_installed(member) for member in DEFAULT_MEMBERS)
     if name == "dinov2_head":
         from imgforensics.detectors.learned import resolve_checkpoint_dir
 
         checkpoint_dir = resolve_checkpoint_dir()
         return all((checkpoint_dir / filename).is_file() for filename in _HEAD_FILES)
+    if name == "dino_inpaint":
+        # Trained by `imgforensics train localizer`, not fetched, so there is
+        # no WEIGHTS entry to look up: it is installed once a run has written
+        # a checkpoint into the directory it would load from.
+        from imgforensics.localization.dino_inpaint import resolve_checkpoint_dir as inpaint_dir
+
+        directory = inpaint_dir()
+        return all((directory / filename).is_file() for filename in _INPAINT_FILES)
     return True
 
 

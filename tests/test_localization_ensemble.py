@@ -1,16 +1,20 @@
 """Tests for the registered localizer ensemble (optional ``ml`` extra).
 
 Offline and CPU-only. The ensemble itself never touches torch -- it only
-calls its members -- so every test here registers two trivial stand-in
-localizers that return hand-chosen heatmaps and combines *those*. What is
-under test is the wrapper: the three combination modes' arithmetic, the
-resampling of a member map that does not match the image, the abstention
-contract, the details, and the mode's configuration precedence. Whether the
-real IML-ViT and CAT-Net agree on a given image is a benchmark question, not
-a unit-test one.
+calls its members -- so every test here registers trivial stand-in localizers
+that return hand-chosen heatmaps and combines *those*: two constant maps, and
+a ``dino_inpaint``-shaped one that is confident inside one region and near
+zero everywhere else, which is what a specialist member contributes. What is
+under test is the wrapper: the three combination modes' arithmetic with two
+and three members, the resampling of a member map that does not match the
+image, the abstention contract, the details, and the mode's configuration
+precedence. Whether the real members agree on a given image is a benchmark
+question, not a unit-test one; the one test that builds the real default
+members points every weight directory at an empty folder, so nothing is ever
+downloaded or loaded.
 
 The module still carries the ``ml`` marker and skips without torch, because
-``localizer_ensemble`` is only registered where its two real members are.
+``localizer_ensemble`` is only registered where its real members are.
 CUDA is hidden so that a machine with a GPU runs these on the CPU like any
 other.
 """
@@ -116,7 +120,76 @@ class _UnweightedLocalizer(_FixedLocalizer):
     is_loaded = False
 
 
+#: The region the dino_inpaint-shaped stand-in is confident about, as
+#: (top, bottom, left, right) on the 6 x 8 test image: 3 x 4 = 12 of 48 pixels.
+_REGION = (1, 4, 2, 6)
+_REGION_VALUE = 0.9
+_BACKGROUND_VALUE = 0.05
+
+
+class _RegionLocalizer(_FixedLocalizer):
+    """Shaped like ``dino_inpaint``: confident about one region, near zero elsewhere.
+
+    A splicing localizer on a fully regenerated image returns a flat, low map;
+    the inpainting localizer returns a high patch where the regeneration is.
+    That asymmetry is what the combination modes treat differently, so it is
+    what the three-member tests are built on.
+    """
+
+    def predict(self, image: ForensicImage) -> DetectionResult:
+        if self.abstains:
+            return super().predict(image)
+        top, bottom, left, right = _REGION
+        heatmap = np.full((image.height, image.width), _BACKGROUND_VALUE, dtype=np.float32)
+        heatmap[top:bottom, left:right] = _REGION_VALUE
+        score = top_fraction_score(heatmap)
+        return DetectionResult(
+            detector=self.name,
+            score=score,
+            label=label_from_score(score),
+            heatmap=heatmap,
+            details={},
+        )
+
+
+@register("fake_localizer_inpaint")
+class _InpaintLocalizer(_RegionLocalizer):
+    name = "fake_localizer_inpaint"
+
+
+@register("fake_localizer_inpaint_no_checkpoint")
+class _InpaintWithoutCheckpoint(_RegionLocalizer):
+    """``dino_inpaint`` with no trained checkpoint installed: dropped at load time."""
+
+    name = "fake_localizer_inpaint_no_checkpoint"
+    is_loaded = False
+
+
+@register("fake_localizer_inpaint_abstaining")
+class _InpaintAbstaining(_RegionLocalizer):
+    """``dino_inpaint`` loaded, but returning no heatmap for this image."""
+
+    name = "fake_localizer_inpaint_abstaining"
+    abstains = True
+
+
+@register("fake_localizer_blind")
+class _BlindLocalizer(_FixedLocalizer):
+    """A splicing localizer looking at an edit with no seam: flat and low."""
+
+    name = "fake_localizer_blind"
+    value = _BACKGROUND_VALUE
+
+
 _FAKE_MEMBERS = ("fake_localizer_low", "fake_localizer_high")
+_THREE_MEMBERS = ("fake_localizer_low", "fake_localizer_high", "fake_localizer_inpaint")
+
+
+def _region_mask() -> np.ndarray:
+    top, bottom, left, right = _REGION
+    mask = np.zeros((_SIZE[1], _SIZE[0]), dtype=bool)
+    mask[top:bottom, left:right] = True
+    return mask
 
 
 @pytest.fixture(autouse=True)
@@ -154,9 +227,37 @@ def test_registry_exposes_the_ensemble_when_torch_is_installed() -> None:
     assert registry.get("localizer_ensemble") is LocalizerEnsemble
 
 
-def test_the_default_members_are_the_two_real_localizers() -> None:
-    assert DEFAULT_MEMBERS == ("catnet_v2", "iml_vit")
+def test_the_default_members_are_the_three_real_localizers_in_order() -> None:
+    assert DEFAULT_MEMBERS == ("catnet_v2", "iml_vit", "dino_inpaint")
     assert LocalizerEnsemble().members == DEFAULT_MEMBERS
+    assert all(name in registry.available() for name in DEFAULT_MEMBERS)
+
+
+def test_the_real_default_members_are_dropped_cleanly_without_weights(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real three-member default, with every weight directory empty.
+
+    Each member's own ``load()`` only checks for its file, so this builds the
+    real ``catnet_v2``, ``iml_vit`` and ``dino_inpaint`` wrappers without
+    downloading or loading a single weight -- and proves that the new member
+    fails the same way the other two do: dropped at load time and named in the
+    abstention, never an exception.
+    """
+    monkeypatch.setenv("IMGFORENSICS_WEIGHTS_DIR", str(tmp_path / "weights"))
+    monkeypatch.setenv("IMGFORENSICS_INPAINT_DIR", str(tmp_path / "no_checkpoint"))
+
+    ensemble = LocalizerEnsemble()
+    ensemble.load("cpu")
+
+    assert ensemble.loaded_members == []
+    result = ensemble.predict(_forensic_image())
+    assert result.score == 0.5
+    assert result.label == "uncertain"
+    assert result.heatmap is None
+    assert result.details["members"] == list(DEFAULT_MEMBERS)
+    for name in DEFAULT_MEMBERS:
+        assert name in result.details["reason"]
 
 
 def test_the_default_mode_is_max_and_the_env_var_overrides_it(
@@ -283,6 +384,112 @@ def test_the_ensemble_runs_rank_mean_end_to_end() -> None:
     # Both members are constant maps, so every pixel ties: rank 0.5 throughout.
     np.testing.assert_allclose(heatmap, 0.5, atol=1e-6)
     assert result.details["mode"] == "rank_mean"
+
+
+# ---------------------------------------------------------------------------
+# Three members: two constant maps and a dino_inpaint-shaped one
+# ---------------------------------------------------------------------------
+
+
+def test_three_members_under_max_take_the_specialist_inside_its_region() -> None:
+    result = _predict(members=_THREE_MEMBERS, mode="max")
+
+    heatmap = result.heatmap
+    assert heatmap is not None
+    region = _region_mask()
+    # Inside the region the inpainting member (0.9) beats the high one (0.8);
+    # outside it the high member wins over the specialist's near-zero map.
+    np.testing.assert_allclose(heatmap[region], _REGION_VALUE, atol=1e-6)
+    np.testing.assert_allclose(heatmap[~region], 0.8, atol=1e-6)
+    assert result.details["mode"] == "max"
+    assert result.details["members"] == list(_THREE_MEMBERS)
+    assert set(result.details["member_scores"]) == set(_THREE_MEMBERS)
+
+
+def test_three_members_under_mean_average_all_three() -> None:
+    result = _predict(members=_THREE_MEMBERS, mode="mean")
+
+    heatmap = result.heatmap
+    assert heatmap is not None
+    region = _region_mask()
+    np.testing.assert_allclose(heatmap[region], (0.2 + 0.8 + _REGION_VALUE) / 3, atol=1e-6)
+    np.testing.assert_allclose(heatmap[~region], (0.2 + 0.8 + _BACKGROUND_VALUE) / 3, atol=1e-6)
+    assert result.details["members"] == list(_THREE_MEMBERS)
+
+
+def test_three_members_under_rank_mean_average_the_members_ranks() -> None:
+    result = _predict(members=_THREE_MEMBERS, mode="rank_mean")
+
+    heatmap = result.heatmap
+    assert heatmap is not None
+    region = _region_mask()
+    # The two constant members tie everywhere -> rank 0.5. The region map has
+    # two values: its 36 background pixels share positions 0..35 (mean 17.5)
+    # and its 12 region pixels positions 36..47 (mean 41.5), over 48 - 1.
+    background_rank, region_rank = 17.5 / 47, 41.5 / 47
+    np.testing.assert_allclose(heatmap[region], (0.5 + 0.5 + region_rank) / 3, atol=1e-6)
+    np.testing.assert_allclose(heatmap[~region], (0.5 + 0.5 + background_rank) / 3, atol=1e-6)
+    assert result.details["mode"] == "rank_mean"
+
+
+def test_max_keeps_a_region_only_the_specialist_sees_and_mean_dilutes_it() -> None:
+    """Why ``max`` is the rule a specialist member needs.
+
+    On a regenerated edit the two splicing localizers are flat and low; only
+    the inpainting localizer sees the region. The maximum keeps it above the
+    0.5 threshold exactly where it is, while the mean divides it by three and
+    drops every pixel of it below the threshold.
+    """
+    members = ("fake_localizer_blind", "fake_localizer_blind", "fake_localizer_inpaint")
+    region = _region_mask()
+
+    under_max = _predict(members=members, mode="max").heatmap
+    under_mean = _predict(members=members, mode="mean").heatmap
+
+    assert under_max is not None and under_mean is not None
+    assert np.array_equal(under_max > 0.5, region)
+    assert not (under_mean > 0.5).any()
+
+
+def test_a_specialist_without_a_checkpoint_leaves_the_two_member_result() -> None:
+    three = _predict(members=[*_FAKE_MEMBERS, "fake_localizer_inpaint_no_checkpoint"], mode="mean")
+    two = _predict(members=_FAKE_MEMBERS, mode="mean")
+
+    assert three.heatmap is not None and two.heatmap is not None
+    np.testing.assert_allclose(three.heatmap, two.heatmap, atol=1e-6)
+    # Dropped at load time: it never ran, so it has no score on the record.
+    assert three.details["members"] == list(_FAKE_MEMBERS)
+    assert "fake_localizer_inpaint_no_checkpoint" not in three.details["member_scores"]
+
+
+def test_a_specialist_that_abstains_is_on_the_record_but_not_in_the_map() -> None:
+    result = _predict(members=[*_FAKE_MEMBERS, "fake_localizer_inpaint_abstaining"], mode="max")
+
+    assert result.heatmap is not None
+    np.testing.assert_allclose(result.heatmap, 0.8, atol=1e-6)
+    assert result.details["members"] == list(_FAKE_MEMBERS)
+    # It ran, so its abstaining score and its cost stay visible.
+    assert result.details["member_scores"]["fake_localizer_inpaint_abstaining"] == 0.5
+    assert "fake_localizer_inpaint_abstaining" in result.details["member_elapsed_ms"]
+
+
+def test_the_ensemble_abstains_when_every_member_including_the_specialist_is_out() -> None:
+    result = _predict(
+        members=[
+            "fake_localizer_unweighted",
+            "fake_localizer_abstaining",
+            "fake_localizer_inpaint_no_checkpoint",
+        ]
+    )
+
+    assert result.heatmap is None
+    assert result.score == 0.5
+    for name in (
+        "fake_localizer_unweighted",
+        "fake_localizer_abstaining",
+        "fake_localizer_inpaint_no_checkpoint",
+    ):
+        assert name in result.details["reason"]
 
 
 # ---------------------------------------------------------------------------

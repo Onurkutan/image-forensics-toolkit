@@ -9,7 +9,13 @@ from PIL import Image
 from typer.testing import CliRunner
 
 from imgforensics.cli import app
-from imgforensics.data.manifest import Manifest, build_manifest, label_from_parent_folder
+from imgforensics.data.manifest import (
+    Manifest,
+    ManifestEntry,
+    ManifestMeta,
+    build_manifest,
+    label_from_parent_folder,
+)
 
 runner = CliRunner()
 
@@ -188,6 +194,155 @@ def test_cli_manifest_sample_writes_a_subsample(tmp_path: Path) -> None:
     sampled = Manifest.load(out_path)
     assert len(sampled.entries) == 4
     assert "sampled 4 of 8 with seed 0" in sampled.meta.notes
+
+
+def _filterable_manifest(path: Path) -> None:
+    """Save a two-split, two-generator manifest with `extra` and masks, at ``path``."""
+    entries: list[ManifestEntry] = []
+    counter = 0
+    for split in ("train", "val"):
+        for index in range(3):
+            for variant in ("orig_512", "orig_1024"):
+                counter += 1
+                entries.append(
+                    ManifestEntry(
+                        path=f"orig/{split}/{index}_{variant}.png",
+                        label="real",
+                        source="ds",
+                        split=split,  # type: ignore[arg-type]
+                        # The two sizes of image 0 are the same file on disk.
+                        sha256=f"{0 if index == 0 else counter:064d}",
+                        width=512,
+                        height=512,
+                        format="PNG",
+                        extra={"variant": variant},
+                    )
+                )
+        for generator in ("sd2-fr", "ps-sp"):
+            for index in range(3):
+                counter += 1
+                entries.append(
+                    ManifestEntry(
+                        path=f"{generator}/{split}/{index}.png",
+                        label="fake",
+                        source="ds",
+                        generator=generator,
+                        split=split,  # type: ignore[arg-type]
+                        mask_path=None if index == 2 else f"masks/{generator}/{index}.png",
+                        sha256=f"{counter:064d}",
+                        width=512,
+                        height=512,
+                        format="PNG",
+                        extra={"mask_type": "segm" if index else "bbox"},
+                    )
+                )
+    meta = ManifestMeta(dataset="ds", root=str(path.parent), created="2026-01-01")
+    Manifest(meta=meta, entries=entries).save(path)
+
+
+def test_cli_manifest_filter_selects_a_split_label_and_generator(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.jsonl"
+    _filterable_manifest(manifest_path)
+    out_path = tmp_path / "filtered.jsonl"
+
+    result = runner.invoke(
+        app,
+        [
+            "manifest",
+            "filter",
+            str(manifest_path),
+            "--out",
+            str(out_path),
+            "--split",
+            "train",
+            "--label",
+            "fake",
+            "--generator",
+            "sd2-fr",
+            "--require-mask",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    filtered = Manifest.load(out_path)
+    assert len(filtered.entries) == 2
+    assert {entry.generator for entry in filtered.entries} == {"sd2-fr"}
+    assert all(entry.mask_path is not None for entry in filtered.entries)
+    assert "split=train" in (filtered.meta.notes or "")
+    assert "mask required" in (filtered.meta.notes or "")
+
+
+def test_cli_manifest_filter_extra_and_dedupe_are_deterministic(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.jsonl"
+    _filterable_manifest(manifest_path)
+
+    outputs = []
+    for run in range(2):
+        out_path = tmp_path / f"reals_{run}.jsonl"
+        result = runner.invoke(
+            app,
+            [
+                "manifest",
+                "filter",
+                str(manifest_path),
+                "--out",
+                str(out_path),
+                "--split",
+                "train",
+                "--label",
+                "real",
+                "--extra",
+                "variant=orig_512",
+                "--extra",
+                "variant=orig_1024",
+                "--dedupe-sha256",
+            ],
+        )
+        assert result.exit_code == 0, result.stdout
+        outputs.append(out_path.read_bytes())
+
+    # Six entries, minus the one duplicate pair that dedupe collapses.
+    filtered = Manifest.load(tmp_path / "reals_0.jsonl")
+    assert len(filtered.entries) == 5
+    assert outputs[0] == outputs[1]
+    assert "deduped by sha256" in (filtered.meta.notes or "")
+
+
+def test_cli_manifest_filter_rejects_a_misspelled_split_or_label(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.jsonl"
+    _filterable_manifest(manifest_path)
+    out_path = tmp_path / "out.jsonl"
+
+    for option, value in (("--split", "trian"), ("--label", "reals")):
+        result = runner.invoke(
+            app,
+            ["manifest", "filter", str(manifest_path), "--out", str(out_path), option, value],
+        )
+
+        # Without the check this matched nothing, wrote an empty manifest and
+        # exited 0 -- a silent failure at the top of a training run.
+        assert result.exit_code != 0, f"{option} {value} was accepted"
+        assert not out_path.exists()
+
+
+def test_cli_manifest_filter_rejects_an_extra_without_a_value(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.jsonl"
+    _filterable_manifest(manifest_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "manifest",
+            "filter",
+            str(manifest_path),
+            "--out",
+            str(tmp_path / "out.jsonl"),
+            "--extra",
+            "variant",
+        ],
+    )
+
+    assert result.exit_code != 0
 
 
 def test_cli_manifest_merge_combines_manifests(tmp_path: Path) -> None:

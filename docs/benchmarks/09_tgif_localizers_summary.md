@@ -57,6 +57,22 @@ IoU are `p`, the masked fraction of the image, averaged over the same fakes.
 
 The pooled AUC in the raw reports (0.669 / 0.531 / 0.678) is the average of these two worlds.
 
+## Result: the full test split, `catnet_v2` only (9,261 images, clean)
+
+Run afterwards as the record for Phase 4b ([`09_tgif_test_full_catnet_v2.md`](09_tgif_test_full_catnet_v2.md),
+433 ms per image): 1,029 reals and 2,058 fakes per subset. The 2,000-image sample above was
+representative to within 0.02 on every number.
+
+| Subset | F1@0.5 | best-F1 | AP | IoU | image AUC vs the 1,029 reals |
+|---|---|---|---|---|---|
+| sd2-sp | 0.891 | **0.927** | 0.960 | 0.823 | 0.959 |
+| ps-sp | 0.863 | **0.910** | 0.945 | 0.783 | 0.956 |
+| sd2-fr | 0.044 | 0.340 | 0.321 | 0.031 | 0.394 |
+| sdxl-fr | 0.028 | 0.200 | 0.179 | 0.019 | 0.331 |
+
+Pooled: pixel F1@0.5 0.457 / best-F1 0.594 / AP 0.601 / IoU 0.414 over the 8,232 fakes, image AUC
+0.660, real-image FPR 0.242 at 0.5. These are the baselines the 4b localizer is measured against.
+
 ## Reading the numbers honestly
 
 - **A composited inpaint is a splice, and CAT-Net finds it.** On the two spliced subsets the
@@ -79,7 +95,9 @@ The pooled AUC in the raw reports (0.669 / 0.531 / 0.678) is the average of thes
 - **`iml_vit` and the ensemble add nothing here either.** IML-ViT ranks pixels a little above
   chance and never crosses 0.5, as on CocoGlide; the `max` ensemble inherits its false positives
   (real-image FPR 0.19 to 0.41) and loses two to five points everywhere. `catnet_v2` alone stays
-  the recommendation.
+  the recommendation among the released models. (The ensemble measured here had two members;
+  since 2026-09-23 it also includes this project's `dino_inpaint`, and the three-member numbers
+  are in [`10_dino_inpaint_summary.md`](10_dino_inpaint_summary.md).)
 - **Real-image false positives are not size-driven.** `catnet_v2` calls 20% of the full-size
   originals, 18% of the 1024 crops and 20% of the 512 crops fake at 0.5; the top-1% rule is a
   heatmap statistic, not a detector, and the threshold is untuned.
@@ -89,5 +107,6 @@ The pooled AUC in the raw reports (0.669 / 0.531 / 0.678) is the average of thes
 Manifest with sha256 and audit over 84,348 files: 14 minutes. The three runs on 2,000 images:
 `catnet_v2` 24 minutes (367 ms per image with the new `jpeglib` coefficient reader, of which the
 quality-100 re-encode and its decode are now a small part), `iml_vit` 22 minutes (364 ms),
-`localizer_ensemble` 33 minutes (691 ms). The full 9,261-image test split and the localization
-robustness suite are the next runs on this set.
+`localizer_ensemble` 33 minutes (691 ms). The full 9,261-image test split with `catnet_v2` took
+67 minutes (433 ms per image; the second half overlapped with a training run on the same GPU).
+The localization robustness suite on this set is still to be run.
