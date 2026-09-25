@@ -87,6 +87,90 @@ false-positive rate at 0.5: 0.338 (`catnet_v2` 0.194). 185 ms per image.
 CocoGlide's 256x256 images are one 266 px tile each. `catnet_v2`'s image AUC is its top-1% rule
 on a heatmap; both real-image false-positive rates are untuned (0.326 here).
 
+## Result: the full TGIF test split (9,261 images, clean)
+
+Recorded on 2026-09-25 ([`10_tgif_test_full_dino_inpaint_01.md`](10_tgif_test_full_dino_inpaint_01.md),
+191 ms per image; `catnet_v2`'s full-split numbers are in
+[`09_tgif_localizers_summary.md`](09_tgif_localizers_summary.md)). The sample was representative
+to within 0.02 on every number.
+
+| Subset | n | F1@0.5 | best-F1 | AP | IoU | image AUC vs the 1,029 reals |
+|---|---|---|---|---|---|---|
+| sd2-fr | 2,058 | 0.412 | **0.580** | **0.595** | 0.302 | **0.876** |
+| sdxl-fr | 2,058 | 0.452 | **0.565** | **0.564** | 0.329 | **0.899** |
+| sd2-sp | 2,058 | 0.326 | 0.549 | 0.572 | 0.236 | 0.727 |
+| ps-sp | 2,058 | 0.181 | 0.403 | 0.415 | 0.120 | 0.622 |
+
+Pooled over the 8,232 fakes: F1@0.5 0.342, best-F1 0.525, AP 0.536, IoU 0.247; real-image FPR
+0.323 at 0.5. `catnet_v2` on the same split: best-F1 0.927 / 0.910 spliced, 0.340 / 0.200
+regenerated; image AUC 0.959 / 0.956 / 0.394 / 0.331.
+
+## Result: the three-member `localizer_ensemble` (`max` over `catnet_v2`, `iml_vit`, `dino_inpaint`)
+
+Measured on 2026-09-25 with `dino_inpaint` as a third member
+([`10_tgif_test_2000_ensemble3.md`](10_tgif_test_2000_ensemble3.md),
+[`10_cocoglide_ensemble3.md`](10_cocoglide_ensemble3.md); 863 ms per TGIF image for the three
+models). Each cell is ensemble / best single member on that subset:
+
+| Set | Subset | F1@0.5 | best-F1 | AP | IoU | image AUC |
+|---|---|---|---|---|---|---|
+| TGIF sample | sd2-sp | 0.794 / 0.895 | 0.877 / 0.926 | 0.912 / 0.959 | 0.702 / 0.829 | 0.932 / 0.971 |
+| TGIF sample | ps-sp | 0.768 / 0.863 | 0.850 / 0.913 | 0.888 / 0.948 | 0.663 / 0.781 | 0.912 / 0.962 |
+| TGIF sample | sd2-fr | **0.401** / 0.398 | 0.551 / 0.567 | 0.547 / 0.574 | 0.291 / 0.291 | 0.800 / 0.867 |
+| TGIF sample | sdxl-fr | 0.446 / 0.461 | 0.552 / 0.575 | 0.540 / 0.574 | 0.325 / 0.338 | 0.824 / 0.904 |
+| TGIF sample | pooled (1,778 fakes) | **0.602** / 0.458 | **0.708** / 0.592 | **0.722** / 0.599 | **0.495** / 0.416 | - |
+| CocoGlide | all (1,024) | **0.489** / 0.425 | **0.652** / 0.637 | 0.643 / 0.672 | **0.381** / 0.333 | 0.743 / 0.768 |
+
+Real-image false-positive rate at 0.5: **0.608** on the TGIF sample's reals and **0.848** on
+CocoGlide's (single members: 0.19-0.34).
+
+## Check: synthesis detector or object segmenter?
+
+TGIF and CocoGlide both inpaint the image's own COCO object, prompted with its category, so
+the mask is always "the object". A patch head over a semantic backbone could learn to segment
+the objects those datasets like to inpaint instead of reading synthesis, and the real-image
+false positives hint at it: on the validation subset the six highest-scoring authentic images
+are all from the `donut` category. The test is paired: for the same photograph, compare the
+heatmap of the authentic image with that of the fake regenerated from it, inside and outside
+the object mask that was inpainted. A synthesis detector lights the object in the fake only;
+an object segmenter lights it in both. Mean probability, `segm` masks, variation 0:
+
+| Set | Pairs | Inside the object: fake / real | Outside: fake / real | Pairs with fake > real inside | Map AP vs the object, fake / real (chance) |
+|---|---|---|---|---|---|
+| TGIF test, sd2-fr | 150 | **0.516** / 0.101 | 0.076 / 0.019 | 96.7% | 0.564 / 0.347 (0.091) |
+| TGIF test, sdxl-fr | 150 | **0.549** / 0.071 | 0.053 / 0.012 | 100% | 0.514 / 0.201 (0.041) |
+| CocoGlide, `dino_inpaint` | 512 | **0.414** / 0.092 | 0.096 / 0.046 | 94.7% | 0.672 / 0.383 (0.252) |
+| CocoGlide, `catnet_v2` | 512 | 0.498 / 0.314 | 0.268 / 0.193 | 76.0% | 0.566 / 0.484 (0.252) |
+
+`dino_inpaint` is predominantly a synthesis detector: the same object gets five to eight times
+the probability once it has been regenerated, in nearly every pair, including on the generator
+it never saw. It also carries an **object prior**: the little mass it puts on authentic images
+concentrates on the object (map AP 3.8-4.9x chance on TGIF, 1.5x on CocoGlide), which is where
+the `donut` tail comes from -- glazed, smooth, high-saturation surfaces that look like what the
+generators produce. The released CAT-Net has the same prior on CocoGlide, more strongly (1.9x
+chance, and only 76% of pairs separated), so the cross-generator comparison above is not
+flattered in `dino_inpaint`'s favour.
+
+## Check: where should the fixed threshold sit?
+
+A sweep on the 500-image validation subset (400 regenerated fakes, 100 authentic crops; never
+used for anything but early stopping), from the stored per-image maps:
+
+| Threshold | mean pixel F1, fakes | authentic images with any pixel above | with > 1% of pixels above | with > 5% |
+|---|---|---|---|---|
+| 0.10 | 0.423 | 0.76 | 0.54 | 0.24 |
+| 0.25 | **0.442** | 0.65 | 0.35 | 0.17 |
+| 0.50 | 0.410 | 0.50 | 0.27 | 0.15 |
+| 0.75 | 0.326 | 0.36 | 0.15 | 0.08 |
+| 0.90 | 0.208 | 0.21 | 0.09 | 0.04 |
+
+Image level (top-1% score): authentic median 0.209 and 90th percentile 0.900, fakes median 0.898
+and 10th percentile 0.475; at 0.5 the rule calls 29% of authentic images and 87% of fakes, at
+0.9 still 10% and 49%. The pixel optimum is 0.25 and moving there buys 0.03 of F1 while lighting
+up more authentic images; the fixed 0.5 is on the flat part of the curve. The problem is not a
+miscalibrated threshold but a tail of authentic images the model is confidently wrong about, so
+no per-checkpoint bias is stored.
+
 ## Reading the numbers honestly
 
 - **The target is met, on the rules fixed before the run.** The bar was sd2-fr best-F1 at
@@ -103,13 +187,24 @@ on a heatmap; both real-image false-positive rates are untuned (0.326 here).
   than a TGIF fit. TGIF's own test split shares its three generators with training, so those
   rows are in-distribution for the generator and held-out for the images.
 - **It is not a splicing localizer, and it was not meant to be.** On the spliced subsets it
-  trails `catnet_v2` by 0.37 and 0.53 best-F1: the splice edge is a cue it never saw in training
-  and its patches are 14 px wide. The two models are complementary, which is what the
-  `localizer_ensemble`'s `max` rule exists for; the next measurement is the three-member ensemble.
-- **Calibration is the open weakness.** A third of the authentic images clear 0.5 somewhere in
-  their heatmap (the top-1% rule punishes any confident patch), and F1@0.5 sits well below
-  best-F1 on every subset. The heatmap ranks well and the fixed threshold does not read it
-  well; a threshold study on the validation split, not more training, is the next step there.
+  trails `catnet_v2` by 0.37 and 0.51 best-F1: the splice edge is a cue it never saw in training
+  and its patches are 14 px wide. The two models are complementary, and the three-member
+  `max` ensemble shows it: the best pooled localization numbers in the project (best-F1
+  0.708 against 0.592 for CAT-Net alone, CocoGlide 0.652) by keeping most of each
+  specialist's strength on its own subset. It gives back 0.02-0.06 per subset against that
+  subset's specialist, because `max` also keeps every member's false positives, and that is
+  the price to state plainly: at the fixed 0.5 the ensemble calls 61% of TGIF's authentic
+  images and 85% of CocoGlide's fake somewhere in the heatmap. As a **map** it is the best
+  default; as an image-level **verdict** it is not usable at 0.5, and the fusion layer's
+  calibration, not the map, is what has to carry that decision.
+- **The open weakness is a tail of confident mistakes, not calibration.** A third of the
+  authentic images clear 0.5 somewhere in their heatmap, but the threshold study shows the fixed
+  0.5 already sits near the pixel optimum; what drives the number is a tail of authentic images
+  (10% score above 0.9) whose objects look like generator output, through the object prior the
+  paired check measures. The levers are on the training side: more and more varied authentic
+  images than TGIF's 4,140 crops (hard negatives from the categories that fire, COCO beyond
+  TGIF's ids), or adapting the backbone. Image-level verdicts should go through the fusion
+  layer, which calibrates on its own held-out data, not through the map's top-1% score.
 - **Stage 2 (LoRA) is not needed to pass, so it is not run tonight.** The validation curve says
   the frozen space saturates in one epoch; adapting the backbone is the way past that ceiling,
   and it is a separate, priced experiment (about 3 hours at batch 4) rather than a prerequisite.
@@ -121,4 +216,5 @@ on a heatmap; both real-image false-positive rates are untuned (0.326 here).
 ## Cost
 
 Training 88 minutes (6 epochs, 27 crops/s average, 0.8 GB VRAM). Benchmarks: TGIF sample 18
-minutes, CocoGlide 1 minute. The full 9,261-image TGIF test split is recorded below when run.
+minutes, CocoGlide 1 minute, the full TGIF test split 76 minutes, the three-member ensemble 38
+minutes on the sample and 10 on CocoGlide.

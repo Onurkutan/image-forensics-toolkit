@@ -299,7 +299,15 @@ measured the same way from its first training run.
   best-F1 on the spliced subsets it was not trained on, and a third of authentic images clear
   0.5 somewhere in their heatmap: the two localizers are complementary and the fixed threshold
   is the open weakness. The verdict rules were fixed before the run and every bar was cleared;
-  stage 2 (LoRA) is optional. See
+  stage 2 (LoRA) is optional. The full 9,261-image test split confirms the sample (best-F1
+  0.580 / 0.565 regenerated, image AUC 0.88 / 0.90), and the three-member `max` ensemble gives the
+  best pooled map in the project (best-F1 0.708 against CAT-Net's 0.592; CocoGlide 0.652) at the
+  price of stacked false positives (61% of authentic images clear 0.5 somewhere). A paired check
+  (the same photograph authentic and regenerated) shows it is a synthesis detector -- five to eight
+  times the probability inside the regenerated object, on 95-100% of pairs, also on CocoGlide --
+  with an object prior that concentrates its authentic-image false positives on the kind of
+  object the datasets inpaint (weaker than CAT-Net's on CocoGlide); a threshold sweep shows 0.5 is
+  already near the pixel optimum, so the lever is harder negatives, not calibration. See
   [`docs/benchmarks/10_dino_inpaint_summary.md`](benchmarks/10_dino_inpaint_summary.md).
 
 ### Phase 5 — Fusion and explanation

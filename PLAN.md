@@ -6,25 +6,25 @@ the workbench design in [docs/design/01_toolbox_architecture.md](docs/design/01_
 
 ## Status
 
-- Now: **Phase 4b, stage 1 passed.** `dino_inpaint` (frozen DINOv2 patch tokens, a 1.2 M-parameter
-  patch head, 448 px crops) trained on TGIF's regenerated subsets reaches pixel best-F1 0.567 / 0.575
-  on sd2-fr / sdxl-fr (CAT-Net 0.325 / 0.205) and 0.637 on CocoGlide, a generator it never saw
-  (CAT-Net 0.605); every bar fixed before the run was cleared
-  (`docs/benchmarks/10_dino_inpaint_summary.md`). Checkpoint `weights/dino_inpaint_01`
-  (research-only, TGIF is CC BY-SA). The implementation (`train localizer`, `manifest filter`,
-  the localizer, tests) is in the tree, uncommitted until the ensemble measurement below.
-- Next step: `dino_inpaint` joins `localizer_ensemble` (implemented, uncommitted); benchmark the
-  three-member `max` ensemble on `tgif_test_2000` and CocoGlide to see whether it takes CAT-Net's
-  spliced-subset numbers and `dino_inpaint`'s regenerated ones; record the full 9,261-image TGIF
-  test split for `dino_inpaint`; then commit the 4b milestone. After that: a threshold study on
-  the validation split (a third of authentic images clear 0.5 somewhere in the heatmap), and
-  optionally stage 2 (LoRA r=8 on qkv, ~3 h) to move past the frozen space's one-epoch ceiling.
-- Queued after that: 6e slice 2, progressive-JPEG coefficients through libjpeg (80% of ITW-SM files
-  are progressive and `catnet_v2` currently re-encodes them, so this changes results and needs a
-  re-benchmark); the full 9,261-image TGIF test split and its robustness suite; 6c publish (HF Space
-  and head weights, one-line heads-up first); the per-year decay chart.
+- Now: **Phase 4b, stage 1 shipped** (commits `720b47b`, `e382f92`). `dino_inpaint` (frozen DINOv2
+  patch tokens, a 1.2 M-parameter patch head, 448 px crops) trained on TGIF's regenerated subsets
+  reaches pixel best-F1 0.580 / 0.565 on the full sd2-fr / sdxl-fr test split (CAT-Net 0.340 / 0.200)
+  and 0.637 on CocoGlide, a generator it never saw (CAT-Net 0.605); the three-member `max`
+  ensemble is the best pooled map (0.708) but stacks false positives (61% of authentic images above
+  0.5 somewhere). Everything is in `docs/benchmarks/10_dino_inpaint_summary.md`; checkpoint
+  `weights/dino_inpaint_01` (research-only, TGIF is CC BY-SA).
+- Next step: **6e slice 2, progressive JPEG coefficients.** 80% of ITW-SM files are progressive and
+  `catnet_v2` currently re-encodes them at quality 100 before reading the DCT stream; libjpeg reads
+  progressive coefficients, so the `jpeglib` path can take them, which changes results and needs a
+  re-benchmark of `catnet_v2` on ITW-SM-style inputs. The 4b calibration question is settled (see
+  Decisions): no per-checkpoint bias; verdicts through the fusion layer.
+- Queued after that: a 4b stage-1b run with hard negatives (more varied authentic images than
+  TGIF's 4,140 crops, weighted towards the categories that fire, e.g. `donut`) against the object
+  prior the paired check measured; optional stage-2 LoRA and the ablations (block 11 only, hard
+  targets, context kernel 1); the localization robustness suite on TGIF; 6c publish (HF Space and
+  head weights, one-line heads-up first); the per-year decay chart.
 - Blockers: none. (TGIF's manual download is done; TGIF2 FLUX/random are not downloaded.)
-- Last update: 2026-09-23
+- Last update: 2026-09-25
 
 ## Milestones
 
@@ -44,8 +44,10 @@ benchmark milestone also reproduces its table from saved records with `imgforens
 - [x] TGIF: download, layout with mask pairing, manifest, first localizer benchmarks (2026-09-21)
 - [x] 4b stage 1: `dino_inpaint`, own DINOv2 inpainting localizer trained on TGIF's regenerated
       subsets; passes the pre-registered bars on TGIF and CocoGlide (2026-09-23)
-- [ ] 4b follow-ups: three-member ensemble measurement, threshold study, optional stage-2 LoRA,
-      the ablations (block 11 only, hard targets, context kernel 1)
+- [x] 4b follow-ups measured: full test split, three-member ensemble, threshold study (2026-09-25)
+- [x] 4b checks: paired object test (a synthesis detector with an object prior, weaker than
+      CAT-Net's on CocoGlide) and threshold study (0.5 is near the pixel optimum) (2026-09-25)
+- [ ] 4b stage 1b: hard negatives against the object prior; optional stage-2 LoRA and ablations
 - [ ] full TGIF test split and localization robustness suite for the record
 ### M5 Fusion and explanation (Phase 5) -- done 2026-09-10
 ### M6 Product and release (Phase 6)
@@ -59,6 +61,14 @@ benchmark milestone also reproduces its table from saved records with `imgforens
 
 ## Decisions
 
+- 2026-09-25 -- No calibration bias is stored in the `dino_inpaint` checkpoint, and image-level
+  verdicts go through the fusion layer rather than the maps' top-1% score. Why: the validation
+  threshold sweep puts the pixel optimum at 0.25 with only +0.03 F1 over 0.5, while lowering it
+  lights more authentic images; the real-image false positives are a tail of confident mistakes
+  driven by an object prior (paired check: authentic maps align with the inpainted object at
+  3.8-4.9x chance on TGIF, 1.5x on CocoGlide, where CAT-Net's prior is 1.9x), which is a training
+  problem, not a threshold one. Alternatives considered: a per-checkpoint logit bias (small gain,
+  more false positives); both bias and fusion (adds a knob nothing needs).
 - 2026-09-23 -- 4b stage 1 (head only, frozen backbone) is accepted as the localizer; stage 2 (LoRA)
   is optional, not a prerequisite. Why: the pre-registered bars were all cleared, and the validation
   curve shows the frozen feature space saturating in one epoch, so LoRA is the priced way past that
