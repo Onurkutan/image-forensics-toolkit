@@ -94,7 +94,8 @@ works. A localizer whose weights are missing does the same.
 | Unseen generator families, both classes re-encoded to JPEG | [Synthbuster](docs/benchmarks/07_synthbuster_summary.md), 9 families (5 never seen), 1,800 fakes against 1,000 COCO photographs, `jpeg_q75` | AUC **0.969**, TPR 0.804, FPR 0.033 at 0.5 |
 | In the wild, never seen, four platforms | [ITW-SM](docs/benchmarks/08_itwsm_summary.md), 10,000 images | AUC **0.888**, FPR **0.442** at 0.5; the WildRF fuser applied cold: FPR 0.214, and on the 27% it will call, balanced accuracy 0.931 |
 | Local diffusion edits, image level | [CocoGlide](docs/benchmarks/02_cocoglide.md), 1,024 images | head AUC 0.644 |
-| Local diffusion edits, pixel level | [CocoGlide masks](docs/benchmarks/03_cocoglide_catnet.md), 512 images | `catnet_v2` best-F1 **0.605**, [`iml_vit`](docs/benchmarks/03_cocoglide_iml_vit.md) 0.486 |
+| Local diffusion edits, pixel level | [CocoGlide masks](docs/benchmarks/03_cocoglide_catnet.md), 512 images | [`dino_inpaint`](docs/benchmarks/10_dino_inpaint_summary.md) best-F1 **0.637** on a generator it never saw, `catnet_v2` 0.605, [`iml_vit`](docs/benchmarks/03_cocoglide_iml_vit.md) 0.486 |
+| Text-guided inpainting, spliced vs fully regenerated | [TGIF test](docs/benchmarks/09_tgif_localizers_summary.md), 2,000-image sample with masks | spliced: `catnet_v2` best-F1 **0.93** / 0.91; fully regenerated: [`dino_inpaint`](docs/benchmarks/10_dino_inpaint_summary.md) **0.57** / 0.58 where `catnet_v2` scores 0.33 / 0.21 and predict-everything 0.23 / 0.11 |
 | Recompression and rescaling | [15-level robustness suite](docs/benchmarks/01_val_dinov2.md) | AUC 1.000 through JPEG q50, 0.567 at quarter scale |
 
 **Same-family generators: 1.000, and it means less than it looks.** On 42 generators the head
@@ -276,7 +277,8 @@ unless one is named with `--detector`, and `benchmark` refuses them outright.
 |---|---|---|---|
 | `iml_vit` | [IML-ViT](https://github.com/SunnyHaze/IML-ViT) (arXiv:2307.14863), CASIA v2 | RGB pixels only | MIT / MIT |
 | `catnet_v2` | [CAT-Net v2](https://github.com/mjkwon2021/CAT-Net) (WACV 2021 / IJCV 2022), CASIAv2 + FantasticReality + IMD2020 + tampCOCO + compRAISE | RGB pixels **and** the JPEG stream's DCT coefficients and quantization table | Apache-2.0 / CC-BY-4.0 |
-| `localizer_ensemble` | both of the above, heatmaps combined pixelwise | both | as above |
+| `dino_inpaint` | this project's own head (1.2 M parameters) over the frozen [DINOv2 ViT-B/14](https://github.com/facebookresearch/dinov2), trained on TGIF's fully regenerated subsets ([Phase 4b](docs/benchmarks/10_dino_inpaint_summary.md)); the checkpoint is research-only because TGIF is CC BY-SA 4.0 and is not shipped | patch-level semantics: where the content was synthesized, rather than a splice edge | this repository / research-only, trained locally with `train localizer` |
+| `localizer_ensemble` | the three above, heatmaps combined pixelwise | all of the above | as above |
 
 The ensemble drops a member whose weights are absent and abstains when none is left.
 `IMGFORENSICS_LOCALIZER_ENSEMBLE_MODE` picks `mean` (default -- both members emit calibrated
@@ -304,6 +306,7 @@ imgforensics datasets prepare NAME --src DIR --out manifest.jsonl
 imgforensics datasets materialize "Community Forensics" --src DIR --out TREE [--max-rows N]
 imgforensics manifest build ROOT --dataset NAME --out manifest.jsonl
 imgforensics manifest sample IN --n N --out OUT
+imgforensics manifest filter IN --out OUT [--split S] [--label L] [--generator G ...] [--extra k=v ...] [--require-mask] [--dedupe-sha256]
 imgforensics manifest merge A B ... --out OUT
 imgforensics manifest split IN --out-train TRAIN --out-val VAL [--by FIELD] [--val-fraction F] [--holdout GROUP]
 imgforensics manifest crop IN --out-dir DIR --out OUT --size N --mode center|tiles [--label real ...]
@@ -320,6 +323,7 @@ imgforensics features extract manifest.jsonl --cache-dir data/features [--backbo
     [--augment configs/augment_default.yaml] [--workers N] [--device auto]
 imgforensics features info --cache-dir data/features
 imgforensics train head --config configs/head_dinov2.yaml [--epochs N] [--out DIR]
+imgforensics train localizer --config configs/experiments/4b_dino_inpaint_stage1.yaml [--epochs N] [--out DIR]
 imgforensics weights list
 imgforensics weights fetch NAME --accept-license
 
@@ -365,6 +369,7 @@ metrics in [`imgforensics.eval.metrics`](src/imgforensics/eval/metrics.py)).
 | Variable | Effect |
 |---|---|
 | `IMGFORENSICS_HEAD_DIR` | Where `dinov2_head` looks for its checkpoint (default `weights/dinov2_head/`, gitignored) |
+| `IMGFORENSICS_INPAINT_DIR` | Where `dino_inpaint` looks for its checkpoint (default `weights/dino_inpaint/`, gitignored); without one the localizer abstains and says so |
 | `IMGFORENSICS_WEIGHTS_DIR` | Where fetched weights and the Hub backbone cache live (default `weights/<name>/`; the DINOv2 backbone is about 350 MB, fetched on first use) |
 | `IMGFORENSICS_FUSER` | Default fuser for `analyze`, `serve` and `demo`, with `weights/fuser.json` as the last fallback |
 | `IMGFORENSICS_HEAD_ATTRIBUTION` | `0`/`false`/`no`/`off` skips the Grad-CAM map. On by default, costing one extra forward and backward pass over the crops the score already used -- 27 ms to 149 ms per image on this project's RTX 2060, no second model, nothing to download. Score, label and heatmap come from the untouched no-grad path either way, so switching it changes no number |
